@@ -3,30 +3,25 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:dio/dio.dart' hide ProgressCallback;
 import 'package:flutter/foundation.dart';
+import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
+import 'package:transformers/src/backends/onnx.dart';
 import 'package:transformers/src/configs.dart';
 import 'package:transformers/src/env.dart';
 import 'package:transformers/src/utils/core.dart';
 import 'package:huggingface_hub/huggingface_hub.dart';
 
-import 'package:path/path.dart' as path;
+import 'package:transformers/src/utils/devices.dart';
+import 'package:transformers/src/utils/dtypes.dart';
+
+// TODO: Put this somewhere better
+Dio dio = Dio();
 
 /// @typedef {boolean|number} ExternalData Whether to load the model using the external data format (used for models >= 2GB in size).
 /// If `true`, the model will be loaded using the external data format.
 /// If a number, this many chunks will be loaded using the external data format (of the form: "model.onnx_data[_{chunk_number}]").
-sealed class ExternalData {}
-
-class ExternalDataBoolean extends ExternalData {
-  final bool value;
-
-  ExternalDataBoolean(this.value);
-}
-
-class ExternalDataNumber extends ExternalData {
-  final int value;
-
-  ExternalDataNumber(this.value);
-}
+typedef ExternalData = dynamic;
 
 const int MAX_EXTERNAL_DATA_CHUNKS = 100;
 
@@ -58,11 +53,189 @@ class PretrainedOptions {
     this.local_files_only = false,
     this.revision = 'main',
   });
+
+  factory PretrainedOptions.fromJson(Map<String, dynamic> json) => PretrainedModelOptions(
+    progress_callback: json['progress_callback'],
+    config: json['config'],
+    cache_dir: json['cache_dir'],
+    local_files_only: json['local_files_only'] ?? false,
+    revision: json['revision'] ?? 'main',
+  );
+
+  Map<String, dynamic> toJson() => {
+    'progress_callback': progress_callback,
+    'config': config,
+    'cache_dir': cache_dir,
+    'local_files_only': local_files_only,
+    'revision': revision,
+  };
+
+  @override
+  String toString() => jsonEncode(this);
+}
+
+/// @typedef {Object} ModelSpecificPretrainedOptions Options for loading a pretrained model.
+/// @property {string} [subfolder='onnx'] In case the relevant files are located inside a subfolder of the model repo on huggingface.co,
+/// you can specify the folder name here.
+/// @property {string} [model_file_name=null] If specified, load the model with this name (excluding the .onnx suffix). Currently only valid for encoder- or decoder-only models.
+/// @property {import("./devices.js").DeviceType|Record<string, import("./devices.js").DeviceType>} [device=null] The device to run the model on. If not specified, the device will be chosen from the environment settings.
+/// @property {import("./dtypes.js").DataType|Record<string, import("./dtypes.js").DataType>} [dtype=null] The data type to use for the model. If not specified, the data type will be chosen from the environment settings.
+/// @property {ExternalData|Record<string, ExternalData>} [use_external_data_format=false] Whether to load the model using the external data format (used for models >= 2GB in size).
+/// @property {import('onnxruntime-common').InferenceSession.SessionOptions} [session_options] (Optional) User-specified session options passed to the runtime. If not provided, suitable defaults will be chosen.
+class ModelSpecificPretrainedOptions {
+  /// In case the relevant files are located inside a subfolder of the model
+  /// repo on huggingface.co, you can specify the folder name here.
+  String subfolder;
+
+  /// If specified, load the model with this name (excluding the .onnx suffix).
+  /// Currently only valid for encoder- or decoder-only models.
+  String? model_file_name;
+
+  /// The device to run the model on. If not specified, the device will be chosen from the environment settings.
+  dynamic device;
+
+  /// The data type to use for the model. If not specified, the data type will
+  /// be chosen from the environment settings.
+  dynamic dtype;
+
+  /// Whether to load the model using the external data format (used for models
+  /// >= 2GB in size).
+  /// [use_external_data_format] has a type of [int], [bool], [Map<String, int or bool>]
+  dynamic use_external_data_format;
+
+  /// User-specified session options passed to the runtime. If not provided,
+  /// suitable defaults will be chosen.
+  OrtSessionOptions? session_options;
+
+  ModelSpecificPretrainedOptions({
+    this.subfolder = 'onnx',
+    this.model_file_name,
+    this.device,
+    this.dtype,
+    // In the typedef for transformers.js it defaults to false. This makes no
+    // sense as otherwise it wouldn't be possible to nullish over to
+    // [config.transformersJsConfig.use_external_data_format] if it was not set
+    // in the config. Otherwise, how do we know if the config explicitly set to
+    // false?
+    this.use_external_data_format,
+    this.session_options,
+  });
+}
+
+/// @typedef {PretrainedOptions & ModelSpecificPretrainedOptions} PretrainedModelOptions Options for loading a pretrained model.
+class PretrainedModelOptions implements PretrainedOptions, ModelSpecificPretrainedOptions {
+  @override
+  String? cache_dir;
+
+  @override
+  PretrainedConfig? config;
+
+  @override
+  bool local_files_only;
+
+  @override
+  ProgressCallback? progress_callback;
+
+  @override
+  String revision;
+
+  /// [device] may be of the type [DeviceType] or [Map<String, DeviceType>]
+  @override
+  dynamic device;
+
+  /// [device] may be of the type [DataType] or [Map<String, DataType>]
+  @override
+  dynamic dtype;
+
+  @override
+  String? model_file_name;
+
+  @override
+  OrtSessionOptions? session_options;
+
+  @override
+  String subfolder;
+
+  /// [use_external_data_format] has a type of [int], [bool], [Map<String, int or bool>]
+  @override
+  dynamic use_external_data_format;
+
+  PretrainedModelOptions({
+    this.progress_callback,
+    Map<String, dynamic>? config,
+    this.cache_dir,
+    this.local_files_only = false,
+    this.revision = 'main',
+    this.subfolder = 'onnx',
+    this.model_file_name,
+    dynamic device,
+    dynamic dtype,
+    // In the typedef for transformers.js it defaults to false. This makes no
+    // sense as otherwise it wouldn't be possible to nullish over to
+    // [config.transformersJsConfig.use_external_data_format] if it was not set
+    // in the config. Otherwise, how do we know if the config explicitly set to
+    // false?
+    this.use_external_data_format,
+    this.session_options,
+  }) : config = config == null ? null : PretrainedConfig.fromJson(config),
+        device = _parseDevice(device),
+        dtype = _parseDtype(dtype);
+
+  static dynamic _parseDevice(dynamic device) {
+    if (device == null) return null;
+    if (device is DeviceType) return device;
+    if (device is Map<String, DeviceType>) return device;
+
+    if (device is String) return DeviceType.fromString(device);
+    if (device is Map) return device.map((k, v) => MapEntry(k, DeviceType.fromString(v)));
+  }
+
+  static dynamic _parseDtype(dynamic dtype) {
+    if (dtype == null) return null;
+    if (dtype is DataType) return dtype;
+    if (dtype is Map<String, DataType>) return dtype;
+
+    if (dtype is String) return DataType.fromString(dtype);
+    if (dtype is Map) return dtype.map((k, v) => MapEntry(k, DataType.fromString(v)));
+  }
+
+  factory PretrainedModelOptions.fromJson(Map<String, dynamic> json) => PretrainedModelOptions(
+    cache_dir: json['cache_dir'],
+    config: json['config'],
+    local_files_only: json['local_files_only'] ?? false,
+    progress_callback: json['progress_callback'],
+    revision: json['revision'] ?? 'main',
+    device: json['device'],
+    dtype: json['dtype'],
+    model_file_name: json['model_file_name'],
+    session_options: json['session_options'] == null ? null : OrtSessionOptionsEx.fromJson(json['session_options']),
+    subfolder: json['subfolder'] ?? 'onnx',
+    use_external_data_format: json['use_external_data_format'],
+  );
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'cache_dir': cache_dir,
+    'config': config,
+    'local_files_only': local_files_only,
+    'progress_callback': progress_callback,
+    'revision': revision,
+    'device': device,
+    'dtype': dtype,
+    'model_file_name': model_file_name,
+    'session_options': session_options?.toJson(),
+    'subfolder': subfolder,
+    'use_external_data_format': use_external_data_format,
+  };
+
+  @override
+  String toString() => jsonEncode(toJson());
 }
 
 /// Determines whether the given string is a valid URL.
 /// @param {string|URL} string The string to test for validity as an URL.
 /// @param {string[]} [protocols=null] A list of valid protocols. If specified, the protocol must be in this list.
+/// Don't include ":" like in JavaScript as "http:" is "http" in dart.
 /// @param {string[]} [validHosts=null] A list of valid hostnames. If specified, the URL's hostname must be in this list.
 /// @returns {boolean} True if the string is a valid URL, false otherwise.
 bool isValidUrl(String string, [List<String>? protocols, List<String>? validHosts]) {
@@ -95,6 +268,54 @@ bool isValidHfModelId(string) {
   return true;
 }
 
+/// Helper function to get a file, using either the Fetch API or FileSystem API.
+///
+/// @param {URL|string} urlOrPath The URL/path of the file to get.
+/// @returns {Promise<FileResponse|Response>} A promise that resolves to a FileResponse object (if the file is retrieved using the FileSystem API), or a Response object (if the file is retrieved using the Fetch API).
+Future<Uint8List> getFile(dynamic urlOrPath) async {
+  if (urlOrPath is! String && urlOrPath is! Uri) {
+    throw ArgumentError('Unsupported input type. Must be a String or Uri');
+  }
+
+  final String urlOrPathString = urlOrPath is Uri ? urlOrPath.toString() : urlOrPath;
+
+  if (!isValidUrl(urlOrPathString, ['http', 'https', 'blob'])) {
+    return File(urlOrPathString).readAsBytes();
+  } else {
+    final IS_CI = bool.tryParse(Platform.environment['TESTING_REMOTELY'] ?? '', caseSensitive: false) ?? false;
+    final version = env.version;
+
+    final Map<String, dynamic> headers = {};
+    headers['User-Agent'] = 'transformers_dart/$version; is_ci/$IS_CI;';
+
+    // Check whether we are making a request to the Hugging Face Hub.
+    final isHFURL = isValidUrl(urlOrPath, ['http', 'https'], ['huggingface.co', 'hf.co']);
+    if (isHFURL) {
+      // If an access token is present in the environment variables,
+      // we add it to the request headers.
+      // NOTE: We keep `HF_ACCESS_TOKEN` for backwards compatibility (as a fallback).
+      final token = Platform.environment['HF_TOKEN'] ?? Platform.environment['HF_ACCESS_TOKEN'];
+      if (token != null) {
+        headers['Authorization'] = 'Bearer $token';
+      }
+    }
+
+    final response = await dio.get<List<int>>(
+      urlOrPathString,
+      options: Options(
+        headers: headers,
+        responseType: ResponseType.bytes,
+      ),
+    );
+
+    if (response.statusCode == 200 && response.data != null) {
+      return Uint8List.fromList(response.data!);
+    } else {
+      throw StateError('Unable to read image from "$urlOrPathString" (${response.statusCode} ${response.statusMessage})');
+    }
+  }
+}
+
 /// Retrieves a file from either a remote URL using the Fetch API or from the local file system using the FileSystem API.
 /// If the filesystem is available and `env.useCache = true`, the file will be downloaded and cached.
 ///
@@ -108,7 +329,7 @@ bool isValidHfModelId(string) {
 ///
 /// @throws Will throw an error if the file is not found and `fatal` is true.
 /// @returns {Promise<string|Uint8Array>} A Promise that resolves with the file content as a Uint8Array if `return_path` is false, or the file path as a string if `return_path` is true.
-Future<String?> getModelFile(String path_or_repo_id, String filename, [bool fatal = true, PretrainedOptions? options, bool return_path = false]) async {
+Future<String> getModelFile(String path_or_repo_id, String filename, [bool fatal = true, PretrainedOptions? options, bool return_path = false]) async {
   // print(path_or_repo_id);
   // print(filename);
 
@@ -117,6 +338,8 @@ Future<String?> getModelFile(String path_or_repo_id, String filename, [bool fata
     repoId: path_or_repo_id,
     filename: filename,
   );
+  if (return_path) return filePath;
+
   return await File(filePath).readAsString();
 
 
