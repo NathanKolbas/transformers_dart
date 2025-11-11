@@ -29,12 +29,20 @@ dependencies:
   web: ^1.1.1
   plugin_platform_interface: ^2.1.8
 
-  huggingface_hub: ^0.0.1
-  unorm_dart: ^0.3.1+1
+  huggingface_hub: ^0.0.3
+  unorm_dart: ^0.3.2
   path: ^1.9.1
+  dio: ^5.9.0
+  image: ^4.5.4
+  flutter_onnxruntime: ^1.5.2
+  path_provider: ^2.1.5
+  crypto: ^3.0.6
+  jinja_minimal: ^1.0.0
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
   flutter_lints: ^6.0.0
 

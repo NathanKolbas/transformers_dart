@@ -11,14 +11,14 @@ void main() {
     print('Loaded AutoTokenizer in ${stopwatch.elapsed}');
 
     stopwatch = Stopwatch()..start();
-    final tokenized = tokenizer(['test']);
+    final tokenized = await tokenizer('test', return_tensor: false);
     stopwatch.stop();
 
     print('Tokenized text in ${stopwatch.elapsed}');
     print('Tokenization: $tokenized');
 
     stopwatch = Stopwatch()..start();
-    final decoded = tokenizer.batch_decode(tokenized.input_ids, skip_special_tokens: true);
+    final decoded = tokenizer.decode(tokenized.input_ids, skip_special_tokens: true);
     stopwatch.stop();
 
     print('Decoded in ${stopwatch.elapsed}');

@@ -2,20 +2,24 @@
 
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 
+import 'package:jinja_minimal/jinja_minimal.dart';
+import 'package:transformers/extensions/iterable_extensions.dart';
+import 'package:transformers/src/utils/tensor.dart';
+import 'package:transformers/src/utils/text_decoder.dart';
+import 'package:transformers/src/utils/text_encoder.dart';
 import "package:unorm_dart/unorm_dart.dart" as unorm;
 import 'package:transformers/src/utils/core.dart';
 import 'package:transformers/src/utils/data_structures.dart';
 import 'package:transformers/src/utils/hub.dart';
-
-import 'configs.dart';
 
 /// @typedef {Object} TokenizerProperties Additional tokenizer-specific properties.
 /// @property {boolean} [legacy=false] Whether or not the `legacy` behavior of the tokenizer should be used.
 /// @typedef {import('./utils/hub.js').PretrainedOptions & TokenizerProperties} PretrainedTokenizerOptions
 class PretrainedTokenizerOptions extends PretrainedOptions {
   /// Whether or not the `legacy` behavior of the tokenizer should be used.
-  bool? legacy = false;
+  bool legacy;
 
   PretrainedTokenizerOptions({
     super.progress_callback,
@@ -23,8 +27,127 @@ class PretrainedTokenizerOptions extends PretrainedOptions {
     super.cache_dir,
     super.local_files_only,
     super.revision,
-    this.legacy,
-  });
+    bool? legacy,
+  }) : legacy = legacy ?? false;
+
+  factory PretrainedTokenizerOptions.fromJson(Map<String, dynamic> json) => PretrainedTokenizerOptions(
+    progress_callback: json['progress_callback'],
+    config: json['config'],
+    cache_dir: json['cache_dir'],
+    local_files_only: json['local_files_only'] ?? false,
+    revision: json['revision'] ?? 'main',
+    legacy: json['legacy'],
+  );
+
+  @override
+  Map<String, dynamic> toJson() => {
+    ...super.toJson(),
+    'legacy': legacy,
+  };
+
+  @override
+  String toString() => jsonEncode(this);
+}
+
+/// Loads a tokenizer from the specified path.
+/// @param {string} pretrained_model_name_or_path The path to the tokenizer directory.
+/// @param {PretrainedTokenizerOptions} options Additional options for loading the tokenizer.
+/// @returns {Promise<any[]>} A promise that resolves with information about the loaded tokenizer.
+Future<(Map<String, dynamic> tokenizerJSON, Map<String, dynamic> tokenizerConfig)> loadTokenizer(
+  String pretrained_model_name_or_path,
+  PretrainedTokenizerOptions options,
+) async {
+  final info = await Future.wait([
+    getModelJSON(pretrained_model_name_or_path, 'tokenizer.json', true, options),
+    getModelJSON(pretrained_model_name_or_path, 'tokenizer_config.json', true, options),
+  ]);
+
+  // Override legacy option if `options.legacy` is not null
+  if (options.legacy) {
+    info.last['legacy'] = options.legacy;
+  }
+  return (info.first, info.last);
+}
+
+/// Helper function to split a string on a regex, but keep the delimiters.
+/// This is required, because the JavaScript `.split()` method does not keep the delimiters,
+/// and wrapping in a capturing group causes issues with existing capturing groups (due to nesting).
+/// @param {string} text The text to split.
+/// @param {RegExp} regex The regex to split on.
+/// @returns {string[]} The split string.
+List<String> regexSplit(String text, Pattern regex) {
+  final List<String> result = [];
+  int prev = 0;
+  for (final match in regex.allMatches(text)) {
+    final fullMatch = match.group(0)!;
+    if (prev < match.start) {
+      result.add(text.substring(prev, match.start));
+    }
+    if (fullMatch.isNotEmpty) {
+      result.add(fullMatch);
+    }
+    prev = match.start + fullMatch.length;
+  }
+  if (prev < text.length) {
+    result.add(text.substring(prev));
+  }
+  return result;
+}
+
+/// Helper method to construct a pattern from a config object.
+/// @param {Object} pattern The pattern object.
+/// @param {boolean} invert Whether to invert the pattern.
+/// @returns {RegExp|null} The compiled pattern.
+RegExp? createPattern(Map<String, dynamic> pattern, [bool invert = true]) {
+  final String? patternRegex = pattern['Regex'];
+  if (patternRegex != null) {
+    // In certain cases, the pattern may contain unnecessary escape sequences (e.g., \# or \& or \~).
+    // i.e., valid in Python (where the patterns are exported from) but invalid in JavaScript (where the patterns are parsed).
+    // This isn't an issue when creating the regex w/o the 'u' flag, but it is when the 'u' flag is used.
+    // For this reason, it is necessary to remove these backslashes before creating the regex.
+    // See https://stackoverflow.com/a/63007777/13989043 for more information
+    String regex = patternRegex.replaceAllMapped(
+      RegExp(r'\\([#&~])'), // TODO: add more characters to this list if necessary
+          (m) => m.group(0)!,
+    );
+
+    // We also handle special cases where the regex contains invalid (non-JS compatible) syntax.
+    // Dart's RegExp engine is based on the same standard (ECMAScript) as JavaScript so we also need to do this.
+    for (final e in PROBLEMATIC_REGEX_MAP.entries) {
+      regex = regex.replaceAll(e.key, e.value);
+    }
+
+    return RegExp(regex, unicode: true);
+  } else if (pattern['String'] != null) {
+    final escaped = escapeRegExp(pattern['String']);
+    // NOTE: if invert is true, we wrap the pattern in a group so that it is kept when performing .split()
+    return RegExp(invert ? escaped : '($escaped)', unicode: true);
+  } else {
+    // console.warn
+    print('Unknown pattern type: $pattern');
+    return null;
+  }
+}
+
+/// Helper function to convert a tensor to a list before decoding.
+/// @param {Tensor} tensor The tensor to convert.
+/// @returns {number[]} The tensor as a list.
+List prepareTensorForDecode(Tensor tensor) {
+  final dims = tensor.dims;
+  switch (dims.length) {
+    case 1:
+      return tensor.tolist();
+    case 2:
+      if (dims[0] != 1) {
+        throw Exception(
+          'Unable to decode tensor with `batch size !== 1`. Use '
+              '`tokenizer.batch_decode(...)` for batched inputs.',
+        );
+      }
+      return tensor.tolist()[0];
+    default:
+      throw Exception('Expected tensor to have 1-2 dimensions, got ${dims.length}.');
+  }
 }
 
 /// Clean up a list of simple English tokenization artifacts like spaces before punctuations and abbreviated forms
@@ -44,6 +167,43 @@ String clean_up_tokenization(String text) {
       .replaceAll(RegExp(r" \'ve"), "'ve")
       .replaceAll(RegExp(r" \'re"), "'re");
 }
+
+/// Helper function to remove accents from a string.
+/// @param {string} text The text to remove accents from.
+/// @returns {string} The text with accents removed.
+String remove_accents(String text) {
+  return text.replaceAll(RegExp(r'\p{M}', unicode: true), '');
+}
+
+/// Helper function to lowercase a string and remove accents.
+/// @param {string} text The text to lowercase and remove accents from.
+/// @returns {string} The lowercased text with accents removed.
+String lowercase_and_remove_accent(String text) {
+  return remove_accents(text.toLowerCase());
+}
+
+/// Checks whether the given Unicode codepoint represents a CJK (Chinese, Japanese, or Korean) character.
+///
+/// A "chinese character" is defined as anything in the CJK Unicode block:
+/// https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_(Unicode_block)
+///
+/// Note that the CJK Unicode block is NOT all Japanese and Korean characters, despite its name.
+/// The modern Korean Hangul alphabet is a different block, as is Japanese Hiragana and Katakana.
+/// Those alphabets are used to write space-separated words, so they are not treated specially
+/// and are handled like all other languages.
+///
+/// @param {number|bigint} cp The Unicode codepoint to check.
+/// @returns {boolean} True if the codepoint represents a CJK character, false otherwise.
+bool is_chinese_char(int cp) => (
+    (cp >= 0x4E00 && cp <= 0x9FFF)
+        || (cp >= 0x3400 && cp <= 0x4DBF)
+        || (cp >= 0x20000 && cp <= 0x2A6DF)
+        || (cp >= 0x2A700 && cp <= 0x2B73F)
+        || (cp >= 0x2B740 && cp <= 0x2B81F)
+        || (cp >= 0x2B820 && cp <= 0x2CEAF)
+        || (cp >= 0xF900 && cp <= 0xFAFF)
+        || (cp >= 0x2F800 && cp <= 0x2FA1F)
+);
 
 /// Helper function to fuse consecutive unknown tokens.
 /// @param {string[]} arr The list of input tokens
@@ -77,25 +237,19 @@ List<String> whitespace_split(String text) {
   return RegExp(r'\S+').allMatches(text).map((x) => x.group(0)!).toList();
 }
 
-/// Loads a tokenizer from the specified path.
-/// @param {string} pretrained_model_name_or_path The path to the tokenizer directory.
-/// @param {PretrainedTokenizerOptions} options Additional options for loading the tokenizer.
-/// @returns {Promise<any[]>} A promise that resolves with information about the loaded tokenizer.
-Future<(Map<String, dynamic> tokenizerJSON, Map<String, dynamic> tokenizerConfig)> loadTokenizer(
-  String pretrained_model_name_or_path,
-  PretrainedTokenizerOptions options,
-) async {
-  final info = await Future.wait([
-    getModelJSON(pretrained_model_name_or_path, 'tokenizer.json', true, options),
-    getModelJSON(pretrained_model_name_or_path, 'tokenizer_config.json', true, options),
-  ]);
+const String PUNCTUATION_REGEX = '\\p{P}\\u0021-\\u002F\\u003A-\\u0040\\u005B-\\u0060\\u007B-\\u007E';
+const String BLOOM_SPLIT_CHARS = '.,!?\u2026\u3002\uff0c\u3001\u0964\u06d4\u060c';
 
-  // Override legacy option if `options.legacy` is not null
-  if (options.legacy != null) {
-    info[1]['legacy'] = options.legacy;
-  }
-  return (info.first, info.last);
-}
+// A mapping of regex patterns to their equivalent (but possibly longer) JS-compatible versions.
+const Map<String, String> PROBLEMATIC_REGEX_MAP = {
+  // This uses the case insensitive group modifier, which is not supported in JavaScript.
+  // When parsing the regex, an "Invalid group" error is thrown.
+  "(?i:'s|'t|'re|'ve|'m|'ll|'d)": "(?:'([sS]|[tT]|[rR][eE]|[vV][eE]|[mM]|[lL][lL]|[dD]))",
+
+  // Used to override the default (invalid) regex of the bloom pretokenizer.
+  // For more information, see https://github.com/huggingface/transformers.js/issues/94
+  ' ?[^(\\s|[$BLOOM_SPLIT_CHARS])]+': ' ?[^\\s$BLOOM_SPLIT_CHARS]+',
+};
 
 /// Represent a token added by the user on top of the existing Model vocabulary.
 /// AddedToken can be configured to specify the behavior they should have in various situations like:
@@ -244,7 +398,7 @@ class WordPieceTokenizer extends TokenizerModel {
      * @type {Map<string, number>}
      */
     // tokens_to_ids = objectToMap(config['vocab']);
-    tokens_to_ids = config['vocab'];
+    tokens_to_ids = config['vocab'] == null ? {} : Map<String, int>.from(config['vocab']);
 
     /**
      * The id of the unknown token.
@@ -439,44 +593,43 @@ class Unigram extends TokenizerModel {
   }
 }
 
-// /**
-//  * Returns list of utf-8 byte and a mapping to unicode strings.
-//  * Specifically avoids mapping to whitespace/control characters the BPE code barfs on.
-//  * @returns {Object} Object with utf-8 byte keys and unicode string values.
-//  */
-// const BYTES_TO_UNICODE = (() => {
-// // Returns list of utf-8 byte and a mapping to unicode strings.
-// // We specifically avoids mapping to whitespace/control characters
-// // the bpe code barfs on.
-//
-// const bs = [
-// ...Array.from({ length: "~".charCodeAt(0) - "!".charCodeAt(0) + 1 }, (_, i) => i + "!".charCodeAt(0)),
-// ...Array.from({ length: "¬".charCodeAt(0) - "¡".charCodeAt(0) + 1 }, (_, i) => i + "¡".charCodeAt(0)),
-// ...Array.from({ length: "ÿ".charCodeAt(0) - "®".charCodeAt(0) + 1 }, (_, i) => i + "®".charCodeAt(0)),
-// ];
-//     const cs = bs.slice();
-// let n = 0;
-// for (let b = 0; b < 256; ++b) {
-// if (!bs.includes(b)) {
-// bs.push(b);
-// cs.push(256 + n);
-// n += 1;
-// }
-// }
-// const ccs = cs.map(n => String.fromCharCode(n));
-// return Object.fromEntries(bs.map((b, i) => [b, ccs[i]]));
-// })();
-//
-// const UNICODE_TO_BYTES = reverseDictionary(BYTES_TO_UNICODE);
+/// Returns list of utf-8 byte and a mapping to unicode strings.
+/// Specifically avoids mapping to whitespace/control characters the BPE code barfs on.
+/// @returns {Object} Object with utf-8 byte keys and unicode string values.
+final BYTES_TO_UNICODE = (() {
+  // Returns list of utf-8 byte and a mapping to unicode strings.
+  // We specifically avoids mapping to whitespace/control characters
+  // the bpe code barfs on.
 
-/**
- * @typedef {Object} BPENode
- * @property {string} token The token associated with the node
- * @property {number} bias A positional bias for the node.
- * @property {number} [score] The score of the node.
- * @property {BPENode} [prev] The previous node in the linked list.
- * @property {BPENode} [next] The next node in the linked list.
- */
+  final List<int> bs = [
+    ...List<int>.generate("~".codeUnitAt(0) - "!".codeUnitAt(0) + 1, (i) => i + "!".codeUnitAt(0)),
+    ...List<int>.generate("¬".codeUnitAt(0) - "¡".codeUnitAt(0) + 1, (i) => i + "¡".codeUnitAt(0)),
+    ...List<int>.generate("ÿ".codeUnitAt(0) - "®".codeUnitAt(0) + 1, (i) => i + "®".codeUnitAt(0)),
+  ];
+  final cs = bs.toList();
+  int n = 0;
+  for (int b = 0; b < 256; ++b) {
+    if (!bs.contains(b)) {
+      bs.add(b);
+      cs.add(256 + n);
+      n += 1;
+    }
+  }
+  final List<String> ccs = cs.map((n) => String.fromCharCode(n)).toList();
+  return Map<int, String>.fromEntries(bs.indexed.map((e) {
+    final (i, b) = e;
+    return MapEntry(b, ccs[i]);
+  }));
+})();
+
+final UNICODE_TO_BYTES = reverseDictionary(BYTES_TO_UNICODE);
+
+/// @typedef {Object} BPENode
+/// @property {string} token The token associated with the node
+/// @property {number} bias A positional bias for the node.
+/// @property {number} [score] The score of the node.
+/// @property {BPENode} [prev] The previous node in the linked list.
+/// @property {BPENode} [next] The next node in the linked list.
 class BPENode {
   String token;
   double bias;
@@ -510,7 +663,7 @@ class BPENode {
 /// BPE class for encoding text into Byte-Pair-Encoding (BPE) tokens.
 /// @extends TokenizerModel
 class BPE extends TokenizerModel {
-  late List<List<String>> merges;
+  late List<(String, String)> merges;
 
   late Map<String, int> bpe_ranks;
 
@@ -540,7 +693,7 @@ class BPE extends TokenizerModel {
   /// @param {boolean} [config.ignore_merges=false] Whether or not to match tokens with the vocab before using merges.
   BPE(super.config) {
     /** @type {Map<string, number>} */
-    tokens_to_ids = config['vocab'];
+    tokens_to_ids = Map<String, int>.from(config['vocab']);
 
     unk_token_id = tokens_to_ids[config['unk_token']];
     unk_token = config['unk_token'];
@@ -556,9 +709,15 @@ class BPE extends TokenizerModel {
 
     /** @type {[string, string][]} */
     merges = use_new_merge_format
-        ? /** @type {[string, string][]} */config['merges']
-        : (/** @type {string[]} */config['merges'] as List<String>).map((x) => /** @type {[string, string]} */x.split(' ').take(2)).toList();
-    bpe_ranks = Map.fromEntries(merges.indexed.map((e) => MapEntry(jsonEncode(e.$2), e.$1)));
+        ? List.from(config['merges']).map((e) {
+            final [a, b] = List<String>.from(e);
+            return (a, b);
+          }).toList()
+        : List<String>.from(config['merges']).map((x) {
+            final [a, b] = x.split(' ').take(2).toList();
+            return (a, b);
+          }).toList();
+    bpe_ranks = Map.fromEntries(merges.indexed.map((e) => MapEntry(jsonEncode([e.$2.$1, e.$2.$2]), e.$1)));
 
     end_of_word_suffix = config['end_of_word_suffix'];
 
@@ -819,22 +978,22 @@ class Normalizer {
     if (config == null) return null;
 
     switch (config['type']) {
-      // case 'BertNormalizer':
-      //   return new BertNormalizer(config);
+      case 'BertNormalizer':
+        return BertNormalizer(config);
       case 'Precompiled':
         return Precompiled(config);
       // case 'Sequence':
       //   return new NormalizerSequence(config);
       // case 'Replace':
       //   return new Replace(config);
-      // case 'NFC':
-      //   return new NFC(config);
-      // case 'NFD':
-      //   return new NFD(config);
-      // case 'NFKC':
-      //   return new NFKC(config);
-      // case 'NFKD':
-      //   return new NFKD(config);
+      case 'NFC':
+        return NFC(config);
+      case 'NFD':
+        return NFD(config);
+      case 'NFKC':
+        return NFKC(config);
+      case 'NFKD':
+        return NFKD(config);
       // case 'Strip':
       //   return new StripNormalizer(config);
       // case 'StripAccents':
@@ -865,6 +1024,190 @@ class Normalizer {
   }
 }
 
+enum UnicodeNormalizerFrom {
+  nfc('NFC'),
+  nfd('NFD'),
+  nfkc('NFKC'),
+  nfkd('NFKD');
+
+  final String value;
+
+  const UnicodeNormalizerFrom(this.value);
+}
+
+/// A normalizer that applies Unicode normalization to the input text.
+/// @extends Normalizer
+/// @abstract
+class UnicodeNormalizer extends Normalizer {
+  /// @type {string} The Unicode normalization form to apply.
+  /// Should be one of: 'NFC', 'NFD', 'NFKC', or 'NFKD'.
+  UnicodeNormalizerFrom? get form => null;
+
+  UnicodeNormalizer(super.config);
+
+  static _getUnorm(UnicodeNormalizerFrom? form) => switch (form) {
+    UnicodeNormalizerFrom.nfc => unorm.nfc,
+    UnicodeNormalizerFrom.nfd => unorm.nfd,
+    UnicodeNormalizerFrom.nfkc => unorm.nfkc,
+    UnicodeNormalizerFrom.nfkd => unorm.nfkd,
+    null => unorm.nfc,
+  };
+
+  /// Normalize the input text by applying Unicode normalization.
+  /// @param {string} text The input text to be normalized.
+  /// @returns {string} The normalized text.
+  @override
+  String normalize(String text) {
+    final norm = _getUnorm(form);
+    text = norm(text);
+    return text;
+  }
+}
+
+/// A normalizer that applies Unicode normalization form C (NFC) to the input text.
+/// Canonical Decomposition, followed by Canonical Composition.
+/// @extends UnicodeNormalizer
+class NFC extends UnicodeNormalizer {
+  @override
+  UnicodeNormalizerFrom? get form => UnicodeNormalizerFrom.nfc;
+
+  NFC(super.config);
+}
+
+/// A normalizer that applies Unicode normalization form D (NFD) to the input text.
+/// Canonical Decomposition.
+/// @extends UnicodeNormalizer
+class NFD extends UnicodeNormalizer {
+  @override
+  UnicodeNormalizerFrom? get form => UnicodeNormalizerFrom.nfd;
+
+  NFD(super.config);
+}
+
+/// A normalizer that applies Unicode normalization form KC (NFKC) to the input text.
+/// Compatibility Decomposition, followed by Canonical Composition.
+/// @extends UnicodeNormalizer
+class NFKC extends UnicodeNormalizer {
+  @override
+  UnicodeNormalizerFrom? get form => UnicodeNormalizerFrom.nfkc;
+
+  NFKC(super.config);
+}
+
+/// A normalizer that applies Unicode normalization form KD (NFKD) to the input text.
+/// Compatibility Decomposition.
+/// @extends UnicodeNormalizer
+class NFKD extends UnicodeNormalizer {
+  @override
+  UnicodeNormalizerFrom? get form => UnicodeNormalizerFrom.nfkd;
+
+  NFKD(super.config);
+}
+
+/// A class representing a normalizer used in BERT tokenization.
+/// @extends Normalizer
+class BertNormalizer extends Normalizer {
+  BertNormalizer(super.config);
+
+  /// Adds whitespace around any CJK (Chinese, Japanese, or Korean) character in the input text.
+  ///
+  /// @param {string} text The input text to tokenize.
+  /// @returns {string} The tokenized text with whitespace added around CJK characters.
+  String _tokenize_chinese_chars(String text) {
+    /* Adds whitespace around any CJK character. */
+    final List<String> output = [];
+    for (int i = 0; i < text.length; ++i) {
+      final char = text[i];
+      final cp = char.codeUnitAt(0);
+      if (is_chinese_char(cp)) {
+        output.add(" ");
+        output.add(char);
+        output.add(" ");
+      } else {
+        output.add(char);
+      }
+    }
+    return output.join("");
+  }
+
+  /// Strips accents from the given text.
+  /// @param {string} text The text to strip accents from.
+  /// @returns {string} The text with accents removed.
+  String stripAccents(String text) {
+    // "Mark, Nonspacing" (Mn)
+    return unorm.nfd(text).replaceAll(RegExp(r'\p{Mn}', unicode: true), '');
+  }
+
+
+  /// Checks whether `char` is a control character.
+  /// @param {string} char The character to check.
+  /// @returns {boolean} Whether `char` is a control character.
+  /// @private
+  bool _is_control(String char) {
+    switch (char) {
+      case '\t':
+      case '\n':
+      case '\r':
+        // These are technically control characters but we count them as whitespace characters.
+        return false;
+
+      default:
+        // Check if unicode category starts with C:
+        // Cc - Control
+        // Cf - Format
+        // Co - Private Use
+        // Cs - Surrogate
+        return RegExp(r'^\p{Cc}|\p{Cf}|\p{Co}|\p{Cs}$', unicode: true).hasMatch(char);
+    }
+  }
+
+  /// Performs invalid character removal and whitespace cleanup on text.
+  /// @param {string} text The text to clean.
+  /// @returns {string} The cleaned text.
+  /// @private
+  String _clean_text(String text) {
+    final List<String> output = [];
+    for (final char in text.split('')) {
+      final cp = char.codeUnitAt(0);
+      if (cp == 0 || cp == 0xFFFD || _is_control(char)) {
+        continue;
+      }
+      if (RegExp(r'^\s$').hasMatch(char)) { // is whitespace
+        output.add(" ");
+      } else {
+        output.add(char);
+      }
+    }
+    return output.join("");
+  }
+
+  /// Normalizes the given text based on the configuration.
+  /// @param {string} text The text to normalize.
+  /// @returns {string} The normalized text.
+  @override
+  String normalize(String text) {
+    if (config['clean_text'] == true) {
+      text = _clean_text(text);
+    }
+
+    if (config['handle_chinese_chars'] == true) {
+      text = _tokenize_chinese_chars(text);
+    }
+
+    if (config['lowercase'] == true) {
+      text = text.toLowerCase();
+
+      if (config['strip_accents'] != false) {
+        text = stripAccents(text);
+      }
+    } else if (config['strip_accents'] == true) {
+      text = stripAccents(text);
+    }
+
+    return text;
+  }
+}
+
 /// A callable class representing a pre-tokenizer used in tokenization. Subclasses
 /// should implement the `pre_tokenize_text` method to define the specific pre-tokenization logic.
 class PreTokenizer {
@@ -882,8 +1225,8 @@ class PreTokenizer {
     if (config == null) return null;
 
     switch (config['type']) {
-      // case 'BertPreTokenizer':
-      //   return new BertPreTokenizer(config);
+      case 'BertPreTokenizer':
+        return BertPreTokenizer(config);
       case 'Sequence':
         return PreTokenizerSequence(config);
       // case 'Whitespace':
@@ -893,10 +1236,10 @@ class PreTokenizer {
       case 'Metaspace':
         return MetaspacePreTokenizer(config);
 
-      // case 'ByteLevel':
-      //   return new ByteLevelPreTokenizer(config);
-      // case 'Split':
-      //   return new SplitPreTokenizer(config);
+      case 'ByteLevel':
+        return ByteLevelPreTokenizer(config);
+      case 'Split':
+        return SplitPreTokenizer(config);
       // case 'Punctuation':
       //   return new PunctuationPreTokenizer(config);
       // case 'Digits':
@@ -940,12 +1283,136 @@ class PreTokenizer {
   }
 }
 
+/// A PreTokenizer that splits text into wordpieces using a basic tokenization scheme
+/// similar to that used in the original implementation of BERT.
+class BertPreTokenizer extends PreTokenizer {
+  // Construct a pattern which matches the rust implementation:
+  // https://github.com/huggingface/tokenizers/blob/b4fcc9ce6e4ad5806e82826f816acfdfdc4fcc67/tokenizers/src/pre_tokenizers/bert.rs#L11
+  // Equivalent to removing whitespace and splitting on punctuation (both \p{P} and other ascii characters)
+  final RegExp pattern = RegExp('[^\\s$PUNCTUATION_REGEX]+|[$PUNCTUATION_REGEX]', unicode: true);
+
+  /// A PreTokenizer that splits text into wordpieces using a basic tokenization scheme
+  /// similar to that used in the original implementation of BERT.
+  ///
+  /// @param {Object} config The configuration object.
+  BertPreTokenizer(super.config);
+
+  /// Tokenizes a single text using the BERT pre-tokenization scheme.
+  ///
+  /// @param {string} text The text to tokenize.
+  /// @param {Object} [options] Additional options for the pre-tokenization logic.
+  /// @returns {string[]} An array of tokens.
+  @override
+  List<String> pre_tokenize_text(String text, [Map<String, dynamic>? options]) {
+    return pattern
+        .allMatches(text.trim())
+        .map((m) => m.group(0))
+        .nonNulls
+        .toList();
+  }
+}
+
+/// A pre-tokenizer that splits text into Byte-Pair-Encoding (BPE) subwords.
+/// @extends PreTokenizer
+class ByteLevelPreTokenizer extends PreTokenizer {
+  /// @type {boolean} Whether to add a leading space to the first word.
+  /// This allows to treat the leading word just as any other word.
+  bool? add_prefix_space;
+
+  /// @type {boolean} Whether the post processing step should trim offsets
+  /// to avoid including whitespaces.
+  /// @todo Use this in the pretokenization step.
+  bool? trim_offsets;
+
+  /// @type {boolean} Whether to use the standard GPT2 regex for whitespace splitting.
+  /// Set it to False if you want to use your own splitting. Defaults to true.
+  bool use_regex;
+
+  RegExp pattern = RegExp(
+    r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+",
+    unicode: true,
+  );
+
+  final Map<int, String> byte_encoder = BYTES_TO_UNICODE;
+
+  final TextEncoder text_encoder = TextEncoder();
+
+  /// Creates a new instance of the `ByteLevelPreTokenizer` class.
+  /// @param {Object} config The configuration object.
+  ByteLevelPreTokenizer(super.config)
+    : add_prefix_space = config['add_prefix_space'],
+      trim_offsets = config['trim_offsets'],
+      use_regex = config['use_regex'] ?? true;
+
+  /// Tokenizes a single piece of text using byte-level tokenization.
+  /// @param {string} text The text to tokenize.
+  /// @param {Object} [options] Additional options for the pre-tokenization logic.
+  /// @returns {string[]} An array of tokens.
+  @override
+  List<String> pre_tokenize_text(String text, [Map<String, dynamic>? options]) {
+    // Add a leading space if the option is enabled
+    if (add_prefix_space == true && !text.startsWith(' ')) {
+      text = ' $text';
+    }
+
+    // Split on whitespace and punctuation
+    final tokens = use_regex 
+        ? pattern.allMatches(text).map((m) => m.group(0)).nonNulls
+        : [text];
+
+    // Maps all our bytes to unicode strings, avoiding control tokens of the BPE (spaces in our case)
+    return tokens.map(
+      (token) => text_encoder.encode(token).map((byte) => byte_encoder[byte]).join('')
+    ).toList();
+  }
+}
+
+/// Splits text using a given pattern.
+/// @extends PreTokenizer
+class SplitPreTokenizer extends PreTokenizer {
+  final RegExp? pattern;
+
+  /// @param {Object} config The configuration options for the pre-tokenizer.
+  /// @param {Object} config.pattern The pattern used to split the text. Can be a string or a regex object.
+  /// @param {string|undefined} config.pattern.String The string to use for splitting. Only defined if the pattern is a string.
+  /// @param {string|undefined} config.pattern.Regex The regex to use for splitting. Only defined if the pattern is a regex.
+  /// @param {SplitDelimiterBehavior} config.behavior The behavior to use when splitting.
+  /// @param {boolean} config.invert Whether to split (invert=false) or match (invert=true) the pattern.
+  SplitPreTokenizer(super.config)
+    // TODO support all behaviours (config.behavior)
+    : pattern = createPattern(config['pattern'], config['invert']);
+
+  /// Tokenizes text by splitting it using the given pattern.
+  /// @param {string} text The text to tokenize.
+  /// @param {Object} [options] Additional options for the pre-tokenization logic.
+  /// @returns {string[]} An array of tokens.
+  @override
+  List<String> pre_tokenize_text(String text, [Map<String, dynamic>? options]) {
+    final pattern = this.pattern;
+    if (pattern == null) {
+      return [];
+    }
+
+    if (config['invert'] == true) {
+      // TODO: Need to handle the g flag instead of always assuming global
+      return pattern.allMatches(text).map((m) => m.group(0)).nonNulls.toList();
+    } else if ((config['behavior'] as String?)?.toLowerCase() == 'removed') {
+      return text.split(pattern).where((x) => x.isNotEmpty).toList();
+    } else {
+      return regexSplit(text, pattern);
+    }
+  }
+}
+
 class PostProcessedOutput {
-  List<String> tokens;
+  final List<String> tokens;
 
-  List<int> token_type_ids;
+  final List<int>? token_type_ids;
 
-  PostProcessedOutput(this.tokens, this.token_type_ids);
+  PostProcessedOutput({
+    required this.tokens,
+    this.token_type_ids,
+  });
 }
 
 class PostProcessor {
@@ -966,16 +1433,16 @@ class PostProcessor {
       case 'TemplateProcessing':
         return TemplateProcessing(config);
 
-      // case 'ByteLevel':
-      //   return new ByteLevelPostProcessor(config);
-      //
-      // case 'RobertaProcessing':
-      //   return new RobertaProcessing(config);
-      // case 'BertProcessing':
-      //   return new BertProcessing(config);
-      //
-      // case 'Sequence':
-      //   return new PostProcessorSequence(config);
+      case 'ByteLevel':
+        return ByteLevelPostProcessor(config);
+
+      case 'RobertaProcessing':
+        return RobertaProcessing(config);
+      case 'BertProcessing':
+        return BertProcessing(config);
+
+      case 'Sequence':
+        return PostProcessorSequence(config);
       default:
         throw ArgumentError.value(config['type'], 'config.type', 'Unknown PostProcessor type: ${config['type']}');
     }
@@ -999,6 +1466,49 @@ class PostProcessor {
     return post_process(tokens, tokens2, add_special_tokens);
   }
 }
+
+/// A post-processor that adds special tokens to the beginning and end of the input.
+class BertProcessing extends PostProcessor {
+  final String cls;
+  final String sep;
+
+  BertProcessing(super.config)
+      : // TODO use all of config: add_prefix_space, trim_offsets
+        cls = config['cls'].first,
+        sep = config['sep'].first;
+
+  /// Adds the special tokens to the beginning and end of the input.
+  /// @param {string[]} tokens The input tokens.
+  /// @param {string[]} [tokens_pair=null] An optional second set of input tokens.
+  /// @returns {PostProcessedOutput} The post-processed tokens with the special tokens added to the beginning and end.
+  @override
+  PostProcessedOutput post_process(List<String>? tokens, [List<String>? tokens2, bool? add_special_tokens]) {
+    add_special_tokens ??= true;
+    if (add_special_tokens) {
+      tokens = mergeArrays([[cls], tokens!, [sep]]);
+    }
+
+    List<int> token_type_ids = List<int>.filled(tokens!.length, 0);
+    if (tokens2 != null) {
+      // NOTE: It is intended to add 2 EOS tokens after the first set of tokens
+      // https://github.com/huggingface/tokenizers/issues/983
+      final List<String> middle = (add_special_tokens && this is RobertaProcessing)
+          ? [sep]
+          : [];
+      final List<String> after = add_special_tokens ? [sep] : [];
+
+      tokens = mergeArrays([tokens, middle, tokens2, after]);
+      token_type_ids = mergeArrays([
+        token_type_ids,
+        List<int>.filled(tokens2.length + middle.length + after.length, 1),
+      ]);
+    }
+    return PostProcessedOutput(tokens: tokens, token_type_ids: token_type_ids);
+  }
+}
+class RobertaProcessing extends BertProcessing {
+  RobertaProcessing(super.config);
+} // NOTE: extends BertProcessing
 
 /// Post processor that replaces special tokens in a template with actual tokens.
 /// @extends PostProcessor
@@ -1044,7 +1554,63 @@ class TemplateProcessing extends PostProcessor {
       }
     }
 
-    return PostProcessedOutput(processedTokens, types);
+    return PostProcessedOutput(tokens: processedTokens, token_type_ids: types);
+  }
+}
+
+/// A PostProcessor that returns the given tokens as is.
+/// @extends PostProcessor
+class ByteLevelPostProcessor extends PostProcessor {
+  ByteLevelPostProcessor(super.config);
+
+  /// Post process the given tokens.
+  /// @param {string[]} tokens The list of tokens for the first sequence.
+  /// @param {string[]} [tokens_pair=null] The list of tokens for the second sequence (optional).
+  /// @returns {PostProcessedOutput} An object containing the post-processed tokens.
+  @override
+  PostProcessedOutput post_process(List<String>? tokens, [List<String>? tokens_pair, bool? add_special_tokens]) {
+    tokens ??= [];
+    if (tokens_pair != null) {
+      tokens = mergeArrays([tokens, tokens_pair]);
+    }
+    return PostProcessedOutput(tokens: tokens);
+  }
+}
+
+/// A post-processor that applies multiple post-processors in sequence.
+class PostProcessorSequence extends PostProcessor {
+  final List<PostProcessor> processors;
+
+  /// Creates a new instance of PostProcessorSequence.
+  /// @param {Object} config The configuration object.
+  /// @param {Object[]} config.processors The list of post-processors to apply.
+  PostProcessorSequence(super.config)
+      : processors = List<Map<String, dynamic>>.from(config['processors'])
+      .map((x) => PostProcessor.fromConfig(x)).nonNulls.toList();
+
+  /// Post process the given tokens.
+  /// @param {string[]} tokens The list of tokens for the first sequence.
+  /// @param {string[]} [tokens_pair=null] The list of tokens for the second sequence (optional).
+  /// @returns {PostProcessedOutput} An object containing the post-processed tokens.
+  @override
+  PostProcessedOutput post_process(List<String>? tokens, [List<String>? tokens2, bool? add_special_tokens]) {
+    List<int>? token_type_ids;
+    for (final processor in processors) {
+      if (processor is ByteLevelPostProcessor) {
+        // Special case where we need to pass the tokens_pair to the post-processor
+        final output = processor.post_process(tokens);
+        tokens = output.tokens;
+        if (tokens2 != null) {
+          final pair_output = processor.post_process(tokens2);
+          tokens2 = pair_output.tokens;
+        }
+      } else {
+        final output = processor.post_process(tokens, tokens2, add_special_tokens);
+        tokens = output.tokens;
+        token_type_ids = output.token_type_ids;
+      }
+    }
+    return PostProcessedOutput(tokens: tokens!, token_type_ids: token_type_ids);
   }
 }
 
@@ -1057,12 +1623,10 @@ class Decoder {
 
   String? end_of_word_suffix;
 
-  String? trim_offsets;
+  bool? trim_offsets;
 
   /// Creates an instance of `Decoder`.
-  Decoder(this.config) {
-    trim_offsets = config['trim_offsets'];
-  }
+  Decoder(this.config) : trim_offsets = config['trim_offsets'];
 
   /// Creates a decoder instance based on the provided configuration.
   ///
@@ -1073,24 +1637,24 @@ class Decoder {
     if (config == null) return null;
 
     switch (config['type']) {
-      // case 'WordPiece':
-      //   return new WordPieceDecoder(config);
+      case 'WordPiece':
+        return WordPieceDecoder(config);
       case 'Metaspace':
         return MetaspaceDecoder(config);
-      // case 'ByteLevel':
-      //   return new ByteLevelDecoder(config);
-      //
-      // case 'Replace':
-      //   return new ReplaceDecoder(config);
-      // case 'ByteFallback':
-      //   return new ByteFallback(config);
-      // case 'Fuse':
-      //   return new FuseDecoder(config);
-      // case 'Strip':
-      //   return new StripDecoder(config);
-      //
-      // case 'Sequence':
-      //   return new DecoderSequence(config);
+      case 'ByteLevel':
+        return ByteLevelDecoder(config);
+
+      case 'Replace':
+        return ReplaceDecoder(config);
+      case 'ByteFallback':
+        return ByteFallback(config);
+      case 'Fuse':
+        return FuseDecoder(config);
+      case 'Strip':
+        return  StripDecoder(config);
+
+      case 'Sequence':
+        return DecoderSequence(config);
       //
       // case 'CTC':
       //   return new CTCDecoder(config);
@@ -1126,6 +1690,223 @@ class Decoder {
   }
 }
 
+class ReplaceDecoder extends Decoder {
+  ReplaceDecoder(super.config);
+
+  @override
+  List<String> decode_chain(List<String> tokens) {
+    final pattern = createPattern(config['pattern']);
+    return pattern == null
+        ? tokens
+        : tokens
+            .map((token) => token.replaceAll(pattern, config['content']))
+            .toList();
+  }
+}
+
+class ByteFallback extends Decoder {
+  final TextDecoder text_decoder = TextDecoder();
+
+  ByteFallback(super.config);
+
+  @override
+  List<String> decode_chain(List<String> tokens) {
+    final List<String> new_tokens = [];
+    List<int> previous_byte_tokens = [];
+
+    for (final token in tokens) {
+      int? bytes;
+      if (token.length == 6 && token.startsWith('<0x') && token.endsWith('>')) {
+        final byte = int.tryParse(token.substring(3, 5), radix: 16);
+        if (byte != null) {
+          bytes = byte;
+        }
+      }
+      if (bytes != null) {
+        previous_byte_tokens.add(bytes);
+      } else {
+        if (previous_byte_tokens.isNotEmpty) {
+          final string = text_decoder.decode(Uint8List.fromList(previous_byte_tokens));
+          new_tokens.add(string);
+          previous_byte_tokens = [];
+        }
+        new_tokens.add(token);
+      }
+    }
+    if (previous_byte_tokens.isNotEmpty) {
+      final string = text_decoder.decode(Uint8List.fromList(previous_byte_tokens));
+      new_tokens.add(string);
+      previous_byte_tokens = [];
+    }
+
+    return new_tokens;
+  }
+}
+
+/// Fuse simply fuses all tokens into one big string.
+/// It's usually the last decoding step anyway, but this decoder
+/// exists incase some decoders need to happen after that step
+class FuseDecoder extends Decoder {
+  FuseDecoder(super.config);
+
+  @override
+  List<String> decode_chain(List<String> tokens) {
+    return [tokens.join('')];
+  }
+}
+
+class StripDecoder extends Decoder {
+  final String content;
+  final int start;
+  final int stop;
+
+  StripDecoder(super.config)
+      : content = config['content'],
+        start = config['start'],
+        stop = config['stop'];
+
+  @override
+  List<String> decode_chain(List<String> tokens) {
+    return tokens.map((token) {
+      int start_cut = 0;
+      for (int i = 0; i < start; ++i) {
+        if (token[i] == content) {
+          start_cut = i + 1;
+          continue;
+        } else {
+          break;
+        }
+      }
+
+      int stop_cut = token.length;
+      for (int i = 0; i < stop; ++i) {
+        final index = token.length - i - 1;
+        if (token[index] == content) {
+          stop_cut = index;
+          continue;
+        } else {
+          break;
+        }
+      }
+
+      return token.substring(start_cut, stop_cut);
+    }).toList();
+  }
+}
+
+/// A decoder that decodes a list of WordPiece tokens into a single string.
+class WordPieceDecoder extends Decoder {
+  /// Whether to cleanup the decoded string.
+  final bool cleanup;
+
+  /// Creates a new instance of WordPieceDecoder.
+  /// @param {Object} config The configuration object.
+  /// @param {string} config.prefix The prefix used for WordPiece encoding.
+  /// @param {boolean} config.cleanup Whether to cleanup the decoded string.
+  WordPieceDecoder(super.config) : cleanup = config['cleanup'] ?? false;
+
+  @override
+  List<String> decode_chain(List<String> tokens) {
+    return tokens.indexed.map((e) {
+      var (i, token) = e;
+
+      if (i != 0) {
+        if (token.startsWith(config['prefix'])) {
+          // NOTE: .replaceFirst() is intended; only replace first occurrence
+          token = token.replaceFirst(config['prefix'], '');
+        } else {
+          token = ' $token';
+        }
+      }
+      if (cleanup) {
+        token = clean_up_tokenization(token);
+      }
+
+      return token;
+    }).toList();
+  }
+}
+
+/// Byte-level decoder for tokenization output. Inherits from the `Decoder` class.
+/// @extends Decoder
+class ByteLevelDecoder extends Decoder {
+  final Map<String, int> byte_decoder = UNICODE_TO_BYTES;
+  final text_decoder = TextDecoder(
+    label: 'utf-8',
+    fatal: false,
+    ignoreBOM: true,
+  );
+
+  ByteLevelDecoder(super.config);
+
+  /// Convert an array of tokens to string by decoding each byte.
+  /// @param {string[]} tokens Array of tokens to be decoded.
+  /// @returns {string} The decoded string.
+  String convert_tokens_to_string(List<String> tokens) {
+    final text = tokens.join('');
+    final byteArray = Uint8List.fromList(text.split('').map((c) => byte_decoder[c]!).toList());
+    final decoded_text = text_decoder.decode(byteArray);
+    return decoded_text;
+  }
+
+  @override
+  List<String> decode_chain(List<String> tokens) {
+    // TODO move to base class (like HF)
+    // tokens === filtered_tokens
+
+    // To avoid mixing byte-level and unicode for byte-level BPT
+    // we need to build string separately for added tokens and byte-level tokens
+    // cf. https://github.com/huggingface/transformers/issues/1133
+    final List<String> sub_texts = [];
+    List<String> current_sub_text = [];
+    for (final token in tokens) {
+      // tokens sent here are already filtered, so we don't need to do this
+      // if (skip_special_tokens && this.all_special_ids.includes(token)) {
+      //     continue;
+      // }
+
+      if (added_tokens.any((x) => x.content == token)) {
+        if (current_sub_text.isNotEmpty) {
+          sub_texts.add(convert_tokens_to_string(current_sub_text));
+          current_sub_text = [];
+        }
+        sub_texts.add(token);
+      } else {
+        current_sub_text.add(token);
+      }
+    }
+    if (current_sub_text.isNotEmpty) {
+      sub_texts.add(convert_tokens_to_string(current_sub_text));
+    }
+
+    // TODO add spaces_between_special_tokens and clean_up_tokenization_spaces options
+
+    return sub_texts;
+  }
+}
+
+/// Apply a sequence of decoders.
+/// @extends Decoder
+class DecoderSequence extends Decoder {
+  final List<Decoder> decoders;
+  /// Creates a new instance of DecoderSequence.
+  /// @param {Object} config The configuration object.
+  /// @param {Object[]} config.decoders The list of decoders to apply.
+  DecoderSequence(super.config)
+      : decoders = List<Map<String, dynamic>>.from(config['decoders'])
+      .map((x) => Decoder.fromConfig(x))
+      .nonNulls
+      .toList();
+
+  @override
+  List<String> decode_chain(List<String> tokens) {
+    // Use reduce to apply each decoder to the tokens
+    return decoders.fold(tokens, (toks, decoder) {
+      return decoder.decode_chain(toks);
+    });
+  }
+}
+
 /// This PreTokenizer replaces spaces with the given replacement character, adds a prefix space if requested,
 /// and returns a list of tokens.
 /// @extends PreTokenizer
@@ -1141,7 +1922,7 @@ class MetaspacePreTokenizer extends PreTokenizer {
   /// @param {string} [config.str_rep=config.replacement] An optional string representation of the replacement character.
   /// @param {'first'|'never'|'always'} [config.prepend_scheme='always'] The metaspace prepending scheme.
   MetaspacePreTokenizer(super.config) {
-    addPrefixSpace = config['add_prefix_space'];
+    addPrefixSpace = config['add_prefix_space'] ?? false;
     replacement = config['replacement'];
     strRep = config['str_rep'] ?? replacement;
     prepend_scheme = config['prepend_scheme'] ?? 'always';
@@ -1342,13 +2123,19 @@ class EncodingSingle {
 
 class BatchEncoding {
   /// List of token ids to be fed to a model.
-  List<List<int>> input_ids;
+  ///
+  /// Can have a type of number[]|number[][]|Tensor.
+  dynamic input_ids;
 
   /// List of indices specifying which tokens should be attended to by the model
-  List<List<int>> attention_mask;
+  ///
+  /// Can have a type of number[]|number[][]|Tensor.
+  dynamic attention_mask;
 
   /// List of token type ids to be fed to a model
-  List<List<int>> token_type_ids;
+  ///
+  /// Can have a type of number[]|number[][]|Tensor.
+  dynamic token_type_ids;
 
   BatchEncoding({
     this.input_ids = const [],
@@ -1356,13 +2143,195 @@ class BatchEncoding {
     this.token_type_ids = const [],
   });
 
-  @override
-  String toString() => jsonEncode({
+  Map<String, dynamic> toJson() => {
     'input_ids': input_ids,
     'attention_mask': attention_mask,
     'token_type_ids': token_type_ids,
-  });
+  };
+
+  @override
+  String toString() => jsonEncode(this);
 }
+
+class MessageContent {
+  /// The type of the message (e.g., "text" or "image").
+  final String type;
+
+  final String? text;
+
+  const MessageContent({
+    required this.type,
+    this.text,
+  });
+
+  factory MessageContent.fromJson(Map<String, dynamic> json) => MessageContent(
+    type: json['type'],
+    text: json['text'],
+  );
+
+  Map<String, dynamic> toJson() => {
+    'type': type,
+    'text': text,
+  };
+
+  @override
+  String toString() => jsonEncode(toJson());
+}
+
+class Message {
+  /// The role of the message (e.g., "user" or "assistant" or "system").
+  final String role;
+
+  /// The content of the message.
+  /// Can be a [String] or [List<MessageContent>].
+  final dynamic content;
+
+  const Message({
+    required this.role,
+    required this.content,
+  });
+
+  factory Message.fromJson(Map<String, dynamic> json) => Message(
+    role: json['role'],
+    content: json['content'],
+  );
+
+  Map<String, dynamic> toJson() => {
+    'role': role,
+    'content': content is String
+        ? content
+        : (content as List<MessageContent>).map((m) => m.toJson()),
+  };
+
+  @override
+  String toString() => jsonEncode(toJson());
+}
+
+class ApplyChatTemplateOptions {
+  /// {string} [options.chat_template=null] A Jinja template to use for this
+  /// conversion. If this is not passed, the model's chat template will be used
+  /// instead.
+  String? chat_template;
+
+  /// {Object[]} [options.tools=null]
+  /// A list of tools (callable functions) that will be accessible to the model. If the template does not
+  /// support function calling, this argument will have no effect. Each tool should be passed as a JSON Schema,
+  /// giving the name, description and argument types for the tool. See our
+  /// [chat templating guide](https://huggingface.co/docs/transformers/main/en/chat_templating#automated-function-conversion-for-tool-use)
+  /// for more information.
+  List<Map<String, dynamic>>? tools;
+
+  /// {Record<string, string>[]} [options.documents=null]
+  /// A list of dicts representing documents that will be accessible to the model if it is performing RAG
+  /// (retrieval-augmented generation). If the template does not support RAG, this argument will have no
+  /// effect. We recommend that each document should be a dict containing "title" and "text" keys. Please
+  /// see the RAG section of the [chat templating guide](https://huggingface.co/docs/transformers/main/en/chat_templating#arguments-for-RAG)
+  /// for examples of passing documents with chat templates.
+  List<Map<String, dynamic>>? documents;
+
+  /// {boolean} [options.add_generation_prompt=false] Whether to end the prompt with the token(s) that indicate
+  /// the start of an assistant message. This is useful when you want to generate a response from the model.
+  /// Note that this argument will be passed to the chat template, and so it must be supported in the
+  /// template for this argument to have any effect.
+  bool add_generation_prompt;
+
+  /// {boolean} [options.tokenize=true] Whether to tokenize the output. If false, the output will be a string.
+  bool tokenize;
+
+  /// {boolean} [options.padding=false] Whether to pad sequences to the maximum length. Has no effect if tokenize is false.
+  bool padding;
+
+  /// {boolean} [options.truncation=false] Whether to truncate sequences to the maximum length. Has no effect if tokenize is false.
+  bool truncation;
+
+  /// {number} [options.max_length=null] Maximum length (in tokens) to use for padding or truncation. Has no effect if tokenize is false.
+  /// If not specified, the tokenizer's `max_length` attribute will be used as a default.
+  num? max_length;
+
+  /// {boolean} [options.return_tensor=true] Whether to return the output as a Tensor or an Array. Has no effect if tokenize is false.
+  bool return_tensor;
+
+  /// {boolean} [options.return_dict=true] Whether to return a dictionary with named outputs. Has no effect if tokenize is false.
+  bool return_dict;
+
+  /// {Object} [options.tokenizer_kwargs={}] Additional options to pass to the tokenizer.
+  Map<String, dynamic> tokenizer_kwargs;
+
+  /// All other arguments to pass along
+  Map<String, dynamic> kwargs;
+
+  ApplyChatTemplateOptions({
+    this.chat_template,
+    this.tools,
+    this.documents,
+    this.add_generation_prompt = false,
+    this.tokenize = true,
+    this.padding = false,
+    this.truncation = false,
+    this.max_length,
+    this.return_tensor = true,
+    // While the typings in js says it defaults to false, in practice it is the opposite...
+    this.return_dict = false,
+    this.tokenizer_kwargs = const {},
+    this.kwargs = const {},
+  });
+
+  factory ApplyChatTemplateOptions.empty() => ApplyChatTemplateOptions.fromJson({});
+
+  static ApplyChatTemplateOptions fromJson(Map<String, dynamic> json) => ApplyChatTemplateOptions(
+    chat_template: json['chat_template'],
+    tools: json['tools'],
+    documents: json['documents'],
+    add_generation_prompt: json['add_generation_prompt'],
+    tokenize: json['tokenize'],
+    padding: json['padding'],
+    truncation: json['truncation'],
+    max_length: json['max_length'],
+    return_tensor: json['return_tensor'],
+    return_dict: json['return_dict'],
+    tokenizer_kwargs: json['tokenizer_kwargs'],
+    kwargs: json['kwargs'],
+  );
+
+  ApplyChatTemplateOptions copyWith({
+    String? chat_template,
+    List<Map<String, dynamic>>? tools,
+    List<Map<String, dynamic>>? documents,
+    bool? add_generation_prompt,
+    bool? tokenize,
+    bool? padding,
+    bool? truncation,
+    num? max_length,
+    bool? return_tensor,
+    bool? return_dict,
+    Map<String, dynamic>? tokenizer_kwargs,
+    Map<String, dynamic>? kwargs,
+  }) => ApplyChatTemplateOptions(
+    chat_template: chat_template ?? this.chat_template,
+    tools: tools ?? this.tools,
+    documents: documents ?? this.documents,
+    add_generation_prompt: add_generation_prompt ?? this.add_generation_prompt,
+    tokenize: tokenize ?? this.tokenize,
+    padding: padding ?? this.padding,
+    truncation: truncation ?? this.truncation,
+    max_length: max_length ?? this.max_length,
+    return_tensor: return_tensor ?? this.return_tensor,
+    return_dict: return_dict ?? this.return_dict,
+    tokenizer_kwargs: tokenizer_kwargs ?? this.tokenizer_kwargs,
+    kwargs: kwargs ?? this.kwargs,
+  );
+}
+
+const List<String> SPECIAL_TOKEN_ATTRIBUTES = [
+  'bos_token',
+  'eos_token',
+  'unk_token',
+  'sep_token',
+  'pad_token',
+  'cls_token',
+  'mask_token',
+  // additional_special_tokens (TODO)
+];
 
 class PreTrainedTokenizer {
   bool return_token_type_ids = false;
@@ -1430,7 +2399,7 @@ class PreTrainedTokenizer {
 
   late dynamic chat_template;
 
-  Map _compiled_template_cache = {};
+  final Map<String, Template> _compiled_template_cache = {};
 
   PreTrainedTokenizer(Map<String, dynamic> tokenizerJSON, Map<String, dynamic> tokenizerConfig) {
     _tokenizer_config = tokenizerConfig;
@@ -1447,6 +2416,24 @@ class PreTrainedTokenizer {
       added_tokens.add(token);
 
       model.tokens_to_ids[token.content] = token.id;
+
+      // Note: There is a very subtle bug that is hidden in JavaScript. If an
+      // Array is smaller than the index at which model.vocab is being inserted
+      // at JavaScript will just increase the size of the array and insert at
+      // that index. This means that onnx-community/granite-docling-258M-ONNX
+      // has an issue due to the missing `<end_of_utterance>` token in
+      // tokenizerJSON['model']['vocab'] but is in
+      // tokenizerJSON['added_tokens'] with an index/id lager than
+      // tokenizerJSON['model']['vocab']. As a workaround, The length of
+      // `model.vocab` will be increased to the largest id of
+      // tokenizerJSON['added_tokens'].
+      if (token.id >= model.vocab.length) {
+        model.vocab = [
+          ...model.vocab,
+          ...List<String>.filled(token.id - (model.vocab.length - 1), ''),
+        ];
+      }
+
       model.vocab[token.id] = token.content;
 
       if (token.special) {
@@ -1456,7 +2443,7 @@ class PreTrainedTokenizer {
     }
 
     // Update additional_special_tokens
-    additional_special_tokens = tokenizerConfig['additional_special_tokens'] ?? [];
+    additional_special_tokens = List<String>.from(tokenizerConfig['additional_special_tokens'] ?? []);
     special_tokens.addAll(additional_special_tokens);
     special_tokens = special_tokens.toSet().toList(); // Remove duplicates
 
@@ -1535,13 +2522,12 @@ class PreTrainedTokenizer {
 
       if (item == null) continue;
 
-      if (item is Object) {
-        // if (item.__type == 'AddedToken') {
-        //   return item.content;
-        // } else {
-        //   throw Exception('Unknown token: $item');
-        // }
-        throw Exception('Unknown token: $item');
+      if (item is Map) {
+        if (item['__type'] == 'AddedToken') {
+          return item['content'];
+        } else {
+          throw Exception('Unknown token: $item');
+        }
       } else {
         return item;
       }
@@ -1573,42 +2559,66 @@ class PreTrainedTokenizer {
   /// @param {boolean} [options.return_tensor=true] Whether to return the results as Tensors or arrays.
   /// @param {boolean} [options.return_token_type_ids=null] Whether to return the token type ids.
   /// @returns {BatchEncoding} Object to be passed to the model.
-  BatchEncoding call(List<String> text, {
-    List<String>? text_pair,
+  Future<BatchEncoding> call(dynamic text, {
+    dynamic text_pair,
     bool padding = false,
     bool add_special_tokens = true,
     bool? truncation,
     num? max_length,
-    bool return_tensor = true,
+    bool return_tensor = true, // Different to HF
     bool? return_token_type_ids,
-  }) {
-    List<EncodingSingle> encodedTokens = [];
-
-    if (text.isEmpty) {
-      throw ArgumentError('text array must be non-empty');
+  }) async {
+    if (!(text is String || text is List<String>)) {
+      throw ArgumentError('Argument `text` must be a String or a List<String>. Provided: "$text"');
     }
 
-    if (text_pair != null) {
-      if (text.length != text_pair.length) {
-        throw ArgumentError('text and text_pair must have the same length');
+    final bool isBatched = text is List<String>;
+
+    List<EncodingSingle> encodedTokens = [];
+
+    if (isBatched) {
+      if (text.isEmpty) {
+        throw ArgumentError('text array must be non-empty');
       }
 
-      encodedTokens = text.indexed.map((e) {
-        final (i, t) = e;
+      if (text_pair != null) {
+        if (text_pair is! List<String>) {
+          throw ArgumentError('text_pair must also be an array');
+        } else if (text.length != text_pair.length) {
+          throw ArgumentError('text and text_pair must have the same length');
+        }
 
-        return _encode_plus(
-          t,
-          text_pair: text_pair[i],
+        encodedTokens = text.indexed.map((e) {
+          final (i, t) = e;
+          return _encode_plus(
+            t,
+            text_pair: text_pair[i],
+            add_special_tokens: add_special_tokens,
+            return_token_type_ids: return_token_type_ids,
+          );
+        }).toList();
+      } else {
+        encodedTokens = text.map((x) => _encode_plus(
+          x,
           add_special_tokens: add_special_tokens,
           return_token_type_ids: return_token_type_ids,
-        );
-      }).toList();
+        )).toList();
+      }
     } else {
-      encodedTokens = text.map((x) => _encode_plus(
-        x,
+      if (text_pair is List) {
+        throw ArgumentError(
+          'When specifying `text_pair`, since `text` is a string, `text_pair` '
+              'must also be a string (i.e., not an array).',
+        );
+      }
+
+      // For single input, we just wrap in an array, and then unwrap later.
+      encodedTokens = [_encode_plus(
+        text,
+        text_pair: text_pair,
         add_special_tokens: add_special_tokens,
         return_token_type_ids: return_token_type_ids,
-      )).toList();
+      )];
     }
 
     // At this point, `encodedTokens` is batched, of shape [batch_size, tokens].
@@ -1667,7 +2677,7 @@ class PreTrainedTokenizer {
 
     final BatchEncoding result = BatchEncoding();
 
-    if (return_tensor && false) {
+    if (return_tensor) {
       if (!(padding && truncation == true)) {
         // Not, guaranteed that all items have same length, so
         // we perform additional check
@@ -1686,7 +2696,11 @@ class PreTrainedTokenizer {
             return false;
           })
         ) {
-          throw Exception("Unable to create tensor, you should probably activate truncation and/or padding with 'padding=true' and 'truncation=true' to have batched tensors with the same length.");
+          throw Exception(
+            "Unable to create tensor, you should probably activate truncation "
+                "and/or padding with 'padding=true' and 'truncation=true' to "
+                "have batched tensors with the same length.",
+          );
         }
       }
 
@@ -1694,35 +2708,45 @@ class PreTrainedTokenizer {
       // NOTE: In the same way as the python library, we return a batched tensor, regardless of
       // whether we have a single input or multiple inputs.
       final dims = [encodedTokens.length, encodedTokens[0].input_ids.length];
+      final required_length = dims.fold(1, (a, b) => a * b);
 
-      // TODO: Need to figure out library for tensor
-      // for (const key of Object.keys(encodedTokens[0])) {
-      //   result[key] = new Tensor('int64',
-      //   BigInt64Array.from(encodedTokens.flatMap(x => x[key]).map(BigInt)),
-      //   dims
-      //   );
-      // }
+      final input_ids_tensor_data = encodedTokens.map((x) => x.input_ids).flat().toList();
+      final attention_mask_tensor_data = encodedTokens.map((x) => x.attention_mask).flat().toList();
+      final token_type_ids_tensor_data = encodedTokens.map((x) => x.token_type_ids).flat().toList();
+
+      if (input_ids_tensor_data.length == required_length) {
+        result.input_ids = await Tensor.create(
+          TensorDataType.int64,
+          input_ids_tensor_data,
+          dims,
+        );
+      }
+      if (attention_mask_tensor_data.length == required_length) {
+        result.attention_mask = await Tensor.create(
+          TensorDataType.int64,
+          attention_mask_tensor_data,
+          dims,
+        );
+      }
+      if (token_type_ids_tensor_data.length == required_length) {
+        result.token_type_ids = await Tensor.create(
+          TensorDataType.int64,
+          token_type_ids_tensor_data,
+          dims,
+        );
+      }
     } else {
       result.input_ids = encodedTokens.map((x) => x.input_ids).toList();
       result.attention_mask = encodedTokens.map((x) => x.attention_mask).toList();
       result.token_type_ids = encodedTokens.map((x) => x.token_type_ids).toList();
 
-      // // If not returning a tensor, we match the input type
-      // if (!isBatched) {
-      //   // Input was not batched, so we unwrap
-      //   for (const key of Object.keys(result)) {
-      //     result[key] = result[key][0];
-      //   }
-      // }
-
-      // for (const key of Object.keys(encodedTokens[0])) {
-      //   result[key] = encodedTokens.map(x => x[key]);
-      // }
-      // result = BatchEncoding(
-      //   input_ids: encodedTokens.map((x) => x.input_ids).toList(),
-      //   attention_mask: encodedTokens.map((x) => x.attention_mask).toList(),
-      //   token_type_ids: encodedTokens.map((x) => x.token_type_ids).toList(),
-      // );
+      // If not returning a tensor, we match the input type
+      if (!isBatched) {
+        // Input was not batched, so we unwrap
+        result.input_ids = result.input_ids[0];
+        result.attention_mask = result.attention_mask[0];
+        result.token_type_ids = result.token_type_ids[0];
+      }
     }
 
     return result;
@@ -1762,10 +2786,9 @@ class PreTrainedTokenizer {
       if (remove_space == true) {
         x = x.trim().split(RegExp(r'\s+')).join(' ');
       }
-      /// TODO
-      // if (do_lowercase_and_remove_accent) {
-      //   x = lowercase_and_remove_accent(x);
-      // }
+      if (do_lowercase_and_remove_accent) {
+        x = lowercase_and_remove_accent(x);
+      }
 
       if (normalizer != null) {
         x = normalizer!(x);
@@ -1876,14 +2899,17 @@ class PreTrainedTokenizer {
   /// @param {number[][]|Tensor} batch List/Tensor of tokenized input sequences.
   /// @param {Object} decode_args (Optional) Object with decoding arguments.
   /// @returns {string[]} List of decoded sequences.
-  List<String> batch_decode(List<List<int>> batch, {
+  List<String> batch_decode(dynamic batch, {
     bool skip_special_tokens = false,
     bool clean_up_tokenization_spaces = true,
   }) {
-    // if (batch instanceof Tensor) {
-    //   batch = batch.tolist();
-    // }
-    return batch.map((x) => decode(
+    if (batch is Tensor) {
+      batch = batch.tolist();
+    }
+
+    return (batch as List<dynamic>)
+        .map((x) => List<int>.from(x))
+        .map((x) => decode(
       x,
       skip_special_tokens: skip_special_tokens,
       clean_up_tokenization_spaces: clean_up_tokenization_spaces,
@@ -1899,15 +2925,18 @@ class PreTrainedTokenizer {
   ///
   /// @returns {string} The decoded string.
   /// @throws {Error} If `token_ids` is not a non-empty array of integers.
-  String decode(List<int> token_ids, {
-    bool skip_special_tokens = false,
-    bool clean_up_tokenization_spaces = true,
+  String decode(dynamic token_ids, {
+    bool? skip_special_tokens,
+    bool? clean_up_tokenization_spaces,
   }) {
-    // if (token_ids instanceof Tensor) {
-    //   token_ids = prepareTensorForDecode(token_ids);
-    // }
+    skip_special_tokens ??= false;
+    clean_up_tokenization_spaces ??= true;
 
-    if (token_ids.isEmpty) {
+    if (token_ids is Tensor) {
+      token_ids = List<int>.from(prepareTensorForDecode(token_ids));
+    }
+
+    if (token_ids is! List<int> || token_ids.isEmpty || !isIntegralNumber(token_ids.first)) {
       throw ArgumentError('token_ids must be a non-empty array of integers.');
     }
 
@@ -1929,7 +2958,7 @@ class PreTrainedTokenizer {
     bool skip_special_tokens = false,
     bool? clean_up_tokenization_spaces,
   }) {
-    var tokens = model.convert_ids_to_tokens(token_ids);
+    List<String> tokens = model.convert_ids_to_tokens(token_ids);
     if (skip_special_tokens) {
       tokens = tokens.where((x) => !special_tokens.contains(x)).toList();
     }
@@ -1941,7 +2970,7 @@ class PreTrainedTokenizer {
 
     // Slight hack, but prevents having to pass `skip_special_tokens` to
     // each call to `decode`, which would lead to code duplication.
-    if (decoder != null && decoder!.end_of_word_suffix != null) {
+    if (decoder != null && decoder!.end_of_word_suffix != null && decoder!.end_of_word_suffix!.isNotEmpty) {
       decoded = decoded.replaceAll(decoder!.end_of_word_suffix!, ' ');
       if (skip_special_tokens) {
         decoded = decoded.trim();
@@ -1954,6 +2983,241 @@ class PreTrainedTokenizer {
 
     return decoded;
   }
+
+  /// Retrieve the chat template string used for tokenizing chat messages. This template is used
+  /// internally by the `apply_chat_template` method and can also be used externally to retrieve the model's chat
+  /// template for better generation tracking.
+  ///
+  /// @param {Object} options An optional object containing the following properties:
+  /// @param {string} [options.chat_template=null]
+  /// A Jinja template or the name of a template to use for this conversion.
+  /// It is usually not necessary to pass anything to this argument,
+  /// as the model's template will be used by default.
+  /// @param {Object[]} [options.tools=null]
+  /// A list of tools (callable functions) that will be accessible to the model. If the template does not
+  /// support function calling, this argument will have no effect. Each tool should be passed as a JSON Schema,
+  /// giving the name, description and argument types for the tool. See our
+  /// [chat templating guide](https://huggingface.co/docs/transformers/main/en/chat_templating#automated-function-conversion-for-tool-use)
+  /// for more information.
+  /// @returns {string} The chat template string.
+  String get_chat_template({
+    String? chat_template,
+    List<Map<String, dynamic>>? tools,
+  }) {
+    // First, handle the cases when the model has a dict of multiple templates
+    if (this.chat_template != null && this.chat_template is Map) {
+      final Map<String, dynamic> templateMap = this.chat_template;
+
+      if (chat_template != null && templateMap.containsKey(chat_template)) {
+        // The user can pass the name of a template to the chat template argument instead of an entire template
+        chat_template = templateMap[chat_template];
+      } else if (chat_template == null) {
+        if (tools != null && templateMap.containsKey('tool_use')) {
+          chat_template = templateMap['tool_use'];
+        } else if (templateMap.containsKey('default')) {
+          chat_template = templateMap['default'];
+        } else {
+          throw ArgumentError(
+            "This model has multiple chat templates with no default specified! Please either pass a chat "
+            "template or the name of the template you wish to use to the 'chat_template' argument. Available "
+            "template names are ${templateMap.keys.toList(growable: false)..sort()}."
+          );
+        }
+      }
+    } else if (chat_template == null) {
+      // These are the cases when the model has a single template
+      // priority: `chat_template` argument > `tokenizer.chat_template`
+      if (this.chat_template != null) {
+        chat_template = this.chat_template;
+      } else {
+        throw ArgumentError(
+          "Cannot use apply_chat_template() because tokenizer.chat_template is not set and no template "
+          "argument was passed! For information about writing templates and setting the "
+          "tokenizer.chat_template attribute, please see the documentation at "
+          "https://huggingface.co/docs/transformers/main/en/chat_templating"
+        );
+      }
+    }
+    return chat_template!;
+  }
+
+  /// Converts a list of message objects with `"role"` and `"content"` keys to a list of token
+  /// ids. This method is intended for use with chat models, and will read the tokenizer's chat_template attribute to
+  /// determine the format and control tokens to use when converting.
+  ///
+  /// See [here](https://huggingface.co/docs/transformers/chat_templating) for more information.
+  ///
+  /// **Example:** Applying a chat template to a conversation.
+  ///
+  /// ```javascript
+  /// import { AutoTokenizer } from "@huggingface/transformers";
+  ///
+  /// const tokenizer = await AutoTokenizer.from_pretrained("Xenova/mistral-tokenizer-v1");
+  ///
+  /// const chat = [
+  ///   { "role": "user", "content": "Hello, how are you?" },
+  ///   { "role": "assistant", "content": "I'm doing great. How can I help you today?" },
+  ///   { "role": "user", "content": "I'd like to show off how chat templating works!" },
+  /// ]
+  ///
+  /// const text = tokenizer.apply_chat_template(chat, { tokenize: false });
+  /// // "<s>[INST] Hello, how are you? [/INST]I'm doing great. How can I help you today?</s> [INST] I'd like to show off how chat templating works! [/INST]"
+  ///
+  /// const input_ids = tokenizer.apply_chat_template(chat, { tokenize: true, return_tensor: false });
+  /// // [1, 733, 16289, 28793, 22557, 28725, 910, 460, 368, 28804, 733, 28748, 16289, 28793, 28737, 28742, 28719, 2548, 1598, 28723, 1602, 541, 315, 1316, 368, 3154, 28804, 2, 28705, 733, 16289, 28793, 315, 28742, 28715, 737, 298, 1347, 805, 910, 10706, 5752, 1077, 3791, 28808, 733, 28748, 16289, 28793]
+  /// ```
+  ///
+  /// @returns {string | Tensor | number[]| number[][]|BatchEncoding} The tokenized output.
+  Future<dynamic> apply_chat_template(List<Message> conversation, [ApplyChatTemplateOptions? options]) async {
+    // TODO: This isn't exactly correct because of the way object dereferencing works in JavaScript so you will probably need to change this
+    final tools = options?.tools;
+    final documents = options?.documents;
+    String? chat_template = options?.chat_template;
+    final add_generation_prompt = options?.add_generation_prompt ?? false;
+    final tokenize = options?.tokenize ?? true;
+    final padding = options?.padding ?? false;
+    final truncation = options?.truncation ?? false;
+    final max_length = options?.max_length;
+    final return_tensor = options?.return_tensor ?? true;
+    final return_dict = options?.return_dict ?? false;
+    final tokenizer_kwargs = options?.tokenizer_kwargs ?? {};
+    final kwargs = options?.kwargs ?? {};
+
+    chat_template = get_chat_template(chat_template: chat_template, tools: tools);
+
+    if (chat_template == null || chat_template is! String) {
+      throw ArgumentError('chat_template must be a string');
+    }
+
+    // Compilation function uses a cache to avoid recompiling the same template
+    final compiledTemplate = _compiled_template_cache.putIfAbsent(
+      chat_template,
+          () => Template(chat_template!),
+    );
+
+    final Map<String, dynamic> special_tokens_map = {};
+    for (final key in SPECIAL_TOKEN_ATTRIBUTES) {
+      final value = getToken([key]);
+      if (value != null) {
+        special_tokens_map[key] = value;
+      }
+    }
+
+    final rendered = compiledTemplate.render({
+      'messages': conversation,
+      'add_generation_prompt': add_generation_prompt,
+      'tools': tools,
+      'documents': documents,
+      ...special_tokens_map,
+      ...kwargs,
+    });
+
+    if (tokenize) {
+      final out = await call(
+        rendered,
+        add_special_tokens: false,
+        padding: padding,
+        truncation: truncation,
+        max_length: max_length,
+        return_tensor: return_tensor,
+      );
+      return return_dict ? out : out.input_ids;
+    }
+
+    return rendered;
+  }
+}
+
+/// BertTokenizer is a class used to tokenize text for BERT models.
+/// @extends PreTrainedTokenizer
+class BertTokenizer extends PreTrainedTokenizer {
+  @override
+  final bool return_token_type_ids = true;
+
+  BertTokenizer(super.tokenizerJSON, super.tokenizerConfig);
+}
+
+class GPT2Tokenizer extends PreTrainedTokenizer {
+  GPT2Tokenizer(super.tokenizerJSON, super.tokenizerConfig);
+}
+
+const String SPIECE_UNDERLINE = '▁';
+
+class LlamaTokenizer extends PreTrainedTokenizer {
+  @override
+  final String padding_side = 'left';
+
+  // @override
+  // bool legacy = true;
+
+  LlamaTokenizer(super.tokenizerJSON, super.tokenizerConfig) {
+    legacy = _tokenizer_config['legacy'] ?? true;
+    if (!legacy) {
+      // See https://github.com/huggingface/transformers/pull/24565 for more information
+      normalizer = null;
+      pre_tokenizer = MetaspacePreTokenizer({
+        'replacement': SPIECE_UNDERLINE,
+        'add_prefix_space': true,
+        'prepend_scheme': "first",
+      });
+    }
+  }
+
+  /// Helper function to handle legacy encoding of SPM tokenizers.
+  /// Adapted from https://github.com/huggingface/transformers/blob/e6dcf8abd6f65bb4b6dfc1831b20d9ba49ce00e2/src/transformers/models/t5/tokenization_t5.py#L374-L387
+  /// @param {string} text The text to encode.
+  /// @returns {string[]} The encoded tokens.
+  @override
+  List<String>? _encode_text(String? text) {
+    if (text == null) return null;
+
+    if (legacy || text.isEmpty) {
+      return super._encode_text(text);
+    }
+
+    List<String>? tokens = super._encode_text(SPIECE_UNDERLINE + text.replaceAll(SPIECE_UNDERLINE, " "));
+    if (tokens != null
+        && tokens.length > 1
+        && tokens.first == SPIECE_UNDERLINE
+        && special_tokens.contains(tokens[1])) {
+      tokens = tokens.sublist(1);
+    }
+    return tokens;
+  }
+}
+class CodeLlamaTokenizer extends PreTrainedTokenizer {
+  CodeLlamaTokenizer(super.tokenizerJSON, super.tokenizerConfig);
+}
+
+class XLMRobertaTokenizer extends PreTrainedTokenizer {
+  XLMRobertaTokenizer(super.tokenizerJSON, super.tokenizerConfig);
+}
+class MPNetTokenizer extends PreTrainedTokenizer {
+  MPNetTokenizer(super.tokenizerJSON, super.tokenizerConfig);
+}
+
+class FalconTokenizer extends PreTrainedTokenizer {
+  FalconTokenizer(super.tokenizerJSON, super.tokenizerConfig);
+}
+
+class GPTNeoXTokenizer extends PreTrainedTokenizer {
+  GPTNeoXTokenizer(super.tokenizerJSON, super.tokenizerConfig);
+}
+
+class EsmTokenizer extends PreTrainedTokenizer {
+  EsmTokenizer(super.tokenizerJSON, super.tokenizerConfig);
+}
+
+class Qwen2Tokenizer extends PreTrainedTokenizer {
+  Qwen2Tokenizer(super.tokenizerJSON, super.tokenizerConfig);
+}
+
+class GemmaTokenizer extends PreTrainedTokenizer {
+  GemmaTokenizer(super.tokenizerJSON, super.tokenizerConfig);
+}
+
+class Grok1Tokenizer extends PreTrainedTokenizer {
+  Grok1Tokenizer(super.tokenizerJSON, super.tokenizerConfig);
 }
 
 /// Helper class which is used to instantiate pretrained tokenizers with the `from_pretrained` function.
@@ -1968,7 +3232,7 @@ class AutoTokenizer {
     // 'CamembertTokenizer': CamembertTokenizer,
     // 'DebertaTokenizer': DebertaTokenizer,
     // 'DebertaV2Tokenizer': DebertaV2Tokenizer,
-    // 'BertTokenizer': BertTokenizer,
+    'BertTokenizer': BertTokenizer.new,
     // 'HerbertTokenizer': HerbertTokenizer,
     // 'ConvBertTokenizer': ConvBertTokenizer,
     // 'RoFormerTokenizer': RoFormerTokenizer,
@@ -1977,7 +3241,7 @@ class AutoTokenizer {
     // 'MobileBertTokenizer': MobileBertTokenizer,
     // 'SqueezeBertTokenizer': SqueezeBertTokenizer,
     // 'AlbertTokenizer': AlbertTokenizer,
-    // 'GPT2Tokenizer': GPT2Tokenizer,
+    'GPT2Tokenizer': GPT2Tokenizer.new,
     // 'BartTokenizer': BartTokenizer,
     // 'MBartTokenizer': MBartTokenizer,
     // 'MBart50Tokenizer': MBart50Tokenizer,
@@ -1990,27 +3254,27 @@ class AutoTokenizer {
     // 'BloomTokenizer': BloomTokenizer,
     // 'NllbTokenizer': NllbTokenizer,
     // 'M2M100Tokenizer': M2M100Tokenizer,
-    // 'LlamaTokenizer': LlamaTokenizer,
-    // 'CodeLlamaTokenizer': CodeLlamaTokenizer,
-    // 'XLMRobertaTokenizer': XLMRobertaTokenizer,
-    // 'MPNetTokenizer': MPNetTokenizer,
-    // 'FalconTokenizer': FalconTokenizer,
-    // 'GPTNeoXTokenizer': GPTNeoXTokenizer,
-    // 'EsmTokenizer': EsmTokenizer,
+    'LlamaTokenizer': LlamaTokenizer.new,
+    'CodeLlamaTokenizer': CodeLlamaTokenizer.new,
+    'XLMRobertaTokenizer': XLMRobertaTokenizer.new,
+    'MPNetTokenizer': MPNetTokenizer.new,
+    'FalconTokenizer': FalconTokenizer.new,
+    'GPTNeoXTokenizer': GPTNeoXTokenizer.new,
+    'EsmTokenizer': EsmTokenizer.new,
     // 'Wav2Vec2CTCTokenizer': Wav2Vec2CTCTokenizer,
     // 'BlenderbotTokenizer': BlenderbotTokenizer,
     // 'BlenderbotSmallTokenizer': BlenderbotSmallTokenizer,
     // 'SpeechT5Tokenizer': SpeechT5Tokenizer,
     // 'NougatTokenizer': NougatTokenizer,
     // 'VitsTokenizer': VitsTokenizer,
-    // 'Qwen2Tokenizer': Qwen2Tokenizer,
-    // 'GemmaTokenizer': GemmaTokenizer,
-    // 'Grok1Tokenizer': Grok1Tokenizer,
+    'Qwen2Tokenizer': Qwen2Tokenizer.new,
+    'GemmaTokenizer': GemmaTokenizer.new,
+    'Grok1Tokenizer': Grok1Tokenizer.new,
     // 'CohereTokenizer': CohereTokenizer,
     // 'MgpstrTokenizer': MgpstrTokenizer,
 
     // Base case:
-    'PreTrainedTokenizer': (Map<String, dynamic> tokenizerJSON, Map<String, dynamic> tokenizerConfig) => PreTrainedTokenizer(tokenizerJSON, tokenizerConfig),
+    'PreTrainedTokenizer': PreTrainedTokenizer.new,
   };
 
 
@@ -2027,24 +3291,12 @@ class AutoTokenizer {
   /// @param {PretrainedTokenizerOptions} options Additional options for loading the tokenizer.
   ///
   /// @returns {Promise<PreTrainedTokenizer>} A new instance of the PreTrainedTokenizer class.
-  static Future<PreTrainedTokenizer> from_pretrained(String pretrained_model_name_or_path, {
-    ProgressCallback? progress_callback,
-    PretrainedConfig? config,
-    String? cache_dir,
-    bool local_files_only = false,
-    String revision = 'main',
-    bool? legacy,
-  }) async {
-    final (tokenizerJSON, tokenizerConfig) = await loadTokenizer(
-        pretrained_model_name_or_path,
-        PretrainedTokenizerOptions(
-      progress_callback: progress_callback,
-      config: config,
-      cache_dir: cache_dir,
-      local_files_only: local_files_only,
-      revision: revision,
-      legacy: legacy,
-    ));
+  static Future<PreTrainedTokenizer> from_pretrained(
+    String pretrained_model_name_or_path,
+    [PretrainedTokenizerOptions? options]
+  ) async {
+    options ??= PretrainedTokenizerOptions();
+    final (tokenizerJSON, tokenizerConfig) = await loadTokenizer(pretrained_model_name_or_path, options);
 
     // Some tokenizers are saved with the "Fast" suffix, so we remove that if present.
     final tokenizerName = (tokenizerConfig['tokenizer_class'] as String?)?.replaceAll(RegExp(r'Fast$'), '') ?? 'PreTrainedTokenizer';
