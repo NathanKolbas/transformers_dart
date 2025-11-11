@@ -1,6 +1,6 @@
 name: transformers
 description: "State-of-the-art Machine Learning for Dart. Run Huggingface Transformers cross-platform on your device, with no need for a server!"
-version: 0.0.1
+version: 0.0.2
 homepage: https://github.com/NathanKolbas/transformers_dart
 repository: https://github.com/NathanKolbas/transformers_dart
 topics:
