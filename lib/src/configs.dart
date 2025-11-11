@@ -6,6 +6,7 @@ import 'package:transformers/src/utils/core.dart';
 import 'package:transformers/src/utils/devices.dart';
 import 'package:transformers/src/utils/dtypes.dart';
 import 'package:transformers/src/utils/hub.dart';
+import 'package:transformers/src/utils/tensor.dart';
 
 
 /// Loads a config from the specified path.
@@ -68,6 +69,7 @@ Map<String, dynamic> getNormalizedConfig(Map<String, dynamic> config) {
     case 'olmo2':
     case 'mobilellm':
     case 'granite':
+    case 'granitemoehybrid':
     case 'cohere':
     case 'mistral':
     case 'starcoder2':
@@ -325,7 +327,7 @@ class PretrainedConfig {
 
   /// The JSON that was used to create this config. May contain more data than
   /// what is hardcoded in this class.
-  Map<String, dynamic> rawJson;
+  Map<String, dynamic> _rawJson;
 
   /// Create a new PreTrainedTokenizer instance.
   /// @param {Object} configJSON The JSON of the config.
@@ -339,15 +341,9 @@ class PretrainedConfig {
         normalized_config = getNormalizedConfig(configJSON),
         image_token_index = configJSON['image_token_index'],
         num_image_tokens = configJSON['num_image_tokens'],
-        rawJson = configJSON {
-    rawJson.addAll({
-      'model_type': model_type,
-      'is_encoder_decoder': is_encoder_decoder,
-      'max_position_embeddings': max_position_embeddings,
-      'normalized_config': normalized_config,
-      'image_token_index': image_token_index,
-      'num_image_tokens': num_image_tokens,
-    });
+        _rawJson = { ...configJSON } {
+    _rawJson['is_encoder_decoder'] = is_encoder_decoder;
+    _rawJson['normalized_config'] = normalized_config;
   }
 
   factory PretrainedConfig.fromJson(Map<String, dynamic> json) => PretrainedConfig(json);
@@ -380,21 +376,12 @@ class PretrainedConfig {
     return PretrainedConfig.fromJson(data);
   }
 
-  dynamic operator [](String key) => rawJson[key];
+  dynamic operator [](String key) => _rawJson[key];
 
-  Map<String, dynamic> toJson() => {
-    'model_type': model_type,
-    'is_encoder_decoder': is_encoder_decoder,
-    'max_position_embeddings': max_position_embeddings,
-    'transformers.js_config': transformersJsConfig.toJson(),
-    'normalized_config': normalized_config,
-    'image_token_index': image_token_index,
-    'num_image_tokens': num_image_tokens,
-    ...rawJson,
-  };
+  Map<String, dynamic> toJson() => { ..._rawJson };
 
   @override
-  String toString() => jsonEncode(this);
+  String toString() => jsonEncode(toJson());
 }
 
 /// Helper class which is used to instantiate pretrained configs with the `from_pretrained` function.
@@ -499,11 +486,18 @@ class TransformersJSConfig {
   });
 
   factory TransformersJSConfig.fromJson(Map<String, dynamic> json) => TransformersJSConfig(
-    kv_cache_dtype: json['kv_cache_dtype'],
+    kv_cache_dtype: json['kv_cache_dtype'] == null
+        ? null : json['kv_cache_dtype'] is String
+          ? TensorDataType.fromString(json['kv_cache_dtype'])
+          : (json['kv_cache_dtype'] as Map).map((k, v) => MapEntry(
+      DataType.fromString(k),
+      TensorDataType.fromString(v),
+      )),
     free_dimension_overrides: json['free_dimension_overrides'],
-    dtype: json['dtype'] is String
-        ? DataType.fromString(json['dtype'])
-        : (json['dtype'] as Map<String, dynamic>).map((k, v) => MapEntry(k, DataType.fromString(v))),
+    dtype: json['dtype'] == null
+        ? null : json['dtype'] is String
+          ? DataType.fromString(json['dtype'])
+          : (json['dtype'] as Map<String, dynamic>).map((k, v) => MapEntry(k, DataType.fromString(v))),
     use_external_data_format: json['use_external_data_format'],
     device_config: json['device_config'] == null
         ? null

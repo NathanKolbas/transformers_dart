@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:transformers/src/tokenizers.dart';
@@ -16,8 +17,7 @@ class BaseStreamer {
   }
 }
 
-// void stdout_write(Object? x) => stdout.write(x);
-void stdout_write(Object? x) => print(x);
+void stdout_write(Object? x) => stdout.write(x);
 
 /// Simple text streamer that prints the token(s) to stdout as soon as entire words are formed.
 class TextStreamer extends BaseStreamer {

@@ -30,7 +30,11 @@ enum TensorDataType {
   uint64,
   bool,
   uint4,
-  int4,
+  int4;
+
+  static TensorDataType fromString(String dataType) => TensorDataType
+      .values
+      .firstWhere((e) => e.name == dataType);
 }
 
 class Tensor<T> {
@@ -90,6 +94,9 @@ class Tensor<T> {
   Future<void> dispose() async {
     await ort_tensor.dispose();
   }
+
+  @override
+  String toString() => 'Tensor { data: $data, type: $type, dims: $dims, size: $size }';
 
   Future<Tensor<T>> operator [](int index) async => await _getitem(index);
 
@@ -182,7 +189,7 @@ class Tensor<T> {
 
     // We use subarray if available (typed array), otherwise we use slice (normal array)
     final data = this.data.sublist(o1, o2);
-    return await Tensor.create(this.type, data, iterDims);
+    return await Tensor.create(type, data, iterDims);
   }
 
   /// Returns the value of this tensor as a standard JavaScript Number. This only works
@@ -190,7 +197,7 @@ class Tensor<T> {
   /// @returns {number|bigint} The value of this tensor as a standard JavaScript Number.
   /// @throws {Error} If the tensor has more than one element.
   T item() {
-    final this_data = this.data;
+    final this_data = data;
     if (this_data.length != 1) {
       throw StateError('a Tensor with ${this_data.length} elements cannot be converted to Scalar');
     }
@@ -206,7 +213,7 @@ class Tensor<T> {
   /// Return a new Tensor with the sigmoid function applied to each element.
   /// @returns {Tensor} The tensor with the sigmoid function applied.
   Future<Tensor<double>> sigmoid() async {
-    final List<T> this_data = this.data;
+    final List<T> this_data = data;
     if (T != num) throw StateError('This tensor is not a num');
 
     final List<double> newData = List.generate(
@@ -344,17 +351,17 @@ class Tensor<T> {
 
     // slices is an array of numbers or arrays of numbers
     // e.g., slices = [0, [1, 3], null, [0, 3]]
-    for (int sliceIndex=0; sliceIndex < this.dims.length; ++sliceIndex) {
-      var slice = slices == null
-          ? slices
-          : (slices is int ? null : slices[sliceIndex]);
+    for (int sliceIndex = 0; sliceIndex < dims.length; ++sliceIndex) {
+      dynamic slice = slices == null
+          ? null
+          : (sliceIndex >= slices.length ? null : slices[sliceIndex]);
 
       if (slice == null) {
         // null or undefined means take the whole dimension
-        newOffsets.add((0, this.dims[sliceIndex]));
-        newTensorDims.add(this.dims[sliceIndex]);
+        newOffsets.add((0, dims[sliceIndex]));
+        newTensorDims.add(dims[sliceIndex]);
       } else if (slice is int) {
-        slice = safeIndex(slice, this.dims[sliceIndex], sliceIndex);
+        slice = safeIndex(slice, dims[sliceIndex], sliceIndex);
 
         // A number means take a single element
         newOffsets.add((slice, slice + 1));
@@ -363,10 +370,10 @@ class Tensor<T> {
         var [int? start, int? end] = slice;
         start = start == null
             ? 0
-            : safeIndex(start, this.dims[sliceIndex], sliceIndex, false);
+            : safeIndex(start, dims[sliceIndex], sliceIndex, false);
         end = end == null
-            ? this.dims[sliceIndex]
-            : safeIndex(end, this.dims[sliceIndex], sliceIndex, false);
+            ? dims[sliceIndex]
+            : safeIndex(end, dims[sliceIndex], sliceIndex, false);
 
         if (start > end) {
           throw Exception('Invalid slice: $slice');
@@ -374,7 +381,7 @@ class Tensor<T> {
 
         final offsets = (
           math.max(start, 0),
-          math.min(end, this.dims[sliceIndex])
+          math.min(end, dims[sliceIndex])
         );
 
         newOffsets.add(offsets);
@@ -403,7 +410,7 @@ class Tensor<T> {
       }
       data[i] = this_data[originalIndex];
     }
-    return await Tensor.create(this.type, data, newTensorDims);
+    return await Tensor.create(type, data, newTensorDims);
   }
 
   /// Return a permuted version of this Tensor, according to the provided dimensions.
@@ -413,6 +420,76 @@ class Tensor<T> {
     final (permutedData, shape) = permute_data(data, this.dims, dims);
     await dispose();
     return await create<T>(type, permutedData, shape);
+  }
+
+  // TODO: implement transpose. For now (backwards compatibility), it's just an alias for permute()
+  Future<Tensor<T>> transpose(List<int> dims) => permute(dims);
+
+  /// Returns the matrix norm or vector norm of a given tensor.
+  /// @param {number|string} [p='fro'] The order of norm
+  /// @param {number} [dim=null] Specifies which dimension of the tensor to calculate the norm across.
+  /// If dim is None, the norm will be calculated across all dimensions of input.
+  /// @param {boolean} [keepdim=false] Whether the output tensors have dim retained or not.
+  /// @returns {Tensor} The norm of the tensor.
+  Future<Tensor> norm([dynamic p = 'fro', int? dim = null, bool keepdim = false]) async {
+    if (p == 'fro') {
+      // NOTE: Since we only support integer dims, Frobenius norm produces the same result as p=2.
+      p = 2;
+    } else if (p is String) {
+      throw ArgumentError('Unsupported norm: $p');
+    }
+
+    final this_data = data;
+    fn(num a, T b, [_, _]) => a + (math.pow(b as num, p));
+
+    if (dim == null) {
+      final val = math.pow(this_data.fold(0, fn), 1 / p);
+      return await create<T>(this.type, [val as T], []);
+    }
+
+    final (type, result, resultDims) = reduce_helper<T, num>(fn, this, dim, keepdim);
+
+    if (p != 1) {
+      for (int i = 0; i < result.length; ++i) {
+        result[i] = math.pow(result[i], 1 / p);
+      }
+    }
+    return await create(type, result, resultDims);
+  }
+
+  /// Performs `L_p` normalization of inputs over specified dimension.
+  /// @param {number} [p=2] The exponent value in the norm formulation
+  /// @param {number} [dim=1] The dimension to reduce
+  /// @returns {Tensor} The normalized tensor.
+  Future<Tensor> normalize([double p = 2.0, int dim = 1]) async {
+    dim = safeIndex(dim, dims.length);
+
+    final norm = await this.norm(p, dim, true);
+
+    final this_data = data.toList();
+    final norm_data = norm.data;
+    for (int i = 0; i < this_data.length; ++i) {
+
+      // Calculate the index in the resulting array
+      int resultIndex = 0;
+
+      for (int j = dims.length - 1, num = i, resultMultiplier = 1; j >= 0; --j) {
+        final size = dims[j];
+        if (j != dim) {
+          final index = num % size;
+          resultIndex += index * resultMultiplier;
+          resultMultiplier *= dims[j];
+        }
+        num = (num / size).floor();
+      }
+
+      // Divide by normalized value
+      this_data[i] = ((this_data[i] as num) / (norm_data[resultIndex] as num)) as T;
+    }
+
+    await norm.dispose();
+    await dispose();
+    return await create<T>(type, this_data, dims);
   }
 
   /// Compute and return the stride of this tensor.
@@ -432,7 +509,7 @@ class Tensor<T> {
     return await create<T>(
       type,
       data,
-      calc_unsqueeze_dims(this.dims, dim),
+      calc_unsqueeze_dims(dims, dim),
     );
   }
 
@@ -579,6 +656,16 @@ Future<Tensor> interpolate_4d<T>(Tensor<T> input, {
   return (await op({ 'x': input, 's': sizeTensor })).first;
 }
 
+/// Matrix product of two tensors.
+/// Inspired by https://pytorch.org/docs/stable/generated/torch.matmul.html
+/// @param {Tensor} a the first tensor to be multiplied
+/// @param {Tensor} b the second tensor to be multiplied
+/// @returns {Promise<Tensor>} The matrix product of the two tensors.
+Future<Tensor> matmul(Tensor a, Tensor b) async {
+  final op = await TensorOpRegistry.matmul;
+  return (await op({ 'a': a, 'b': b })).first;
+}
+
 /// Returns the k largest elements of the given input tensor.
 /// Inspired by https://pytorch.org/docs/stable/generated/torch.topk.html
 /// @param {Tensor} x the input tensor
@@ -626,6 +713,52 @@ Future<Tensor> slice(Tensor data, List<int> starts, List<int> ends, List<int> ax
     'a': await arrayToIndexTensor(axes),
     't': await arrayToIndexTensor(steps ?? List.filled(axes.length, 1)),
   })).first;
+}
+
+/// Perform mean pooling of the last hidden state followed by a normalization step.
+/// @param {Tensor} last_hidden_state Tensor of shape [batchSize, seqLength, embedDim]
+/// @param {Tensor} attention_mask Tensor of shape [batchSize, seqLength]
+/// @returns {Tensor} Returns a new Tensor of shape [batchSize, embedDim].
+Future<Tensor> mean_pooling(Tensor last_hidden_state, Tensor attention_mask) async {
+  // last_hidden_state: [batchSize, seqLength, embedDim]
+  // attention_mask:    [batchSize, seqLength]
+  final lastHiddenStateData = last_hidden_state.data;
+  final attentionMaskData = List<num>.from(attention_mask.data);
+
+  final shape = [last_hidden_state.dims[0], last_hidden_state.dims[2]];
+
+  final returnedData = List<num>.filled(shape[0] * shape[1], 0);
+  final [batchSize, seqLength, embedDim] = last_hidden_state.dims;
+
+  int outIndex = 0;
+  for (int i = 0; i < batchSize; ++i) {
+    final offset = i * embedDim * seqLength;
+
+    for (int k = 0; k < embedDim; ++k) {
+      num sum = 0;
+      num count = 0;
+
+      final attnMaskOffset = i * seqLength;
+      final offset2 = offset + k;
+      // Pool over all words in sequence
+      for (int j = 0; j < seqLength; ++j) {
+        // index into attention mask
+        final attn = attentionMaskData[attnMaskOffset + j];
+
+        count += attn;
+        sum += lastHiddenStateData[offset2 + j * embedDim] * attn;
+      }
+
+      final avg = sum / count;
+      returnedData[outIndex++] = avg;
+    }
+  }
+
+  return await Tensor.create(
+    last_hidden_state.type,
+    returnedData,
+    shape,
+  );
 }
 
 /// Helper function to calculate new dimensions when performing an unsqueeze operation.
@@ -740,6 +873,54 @@ Future<Tensor<T>> stack<T>(List<Tensor<T>> tensors, [int dim = 0]) async {
   );
 }
 
+/// @param {(previousValue: any, currentValue: any, currentIndex?: number, resultIndex?: number) => any} callbackfn
+/// @param {Tensor} input the input tensor.
+/// @param {number|null} dim the dimension to reduce.
+/// @param {boolean} keepdim whether the output tensor has dim retained or not.
+/// @returns {[DataType, any, number[]]} The reduced tensor data.
+(TensorDataType, List<U>, List<int>) reduce_helper<T, U>(
+  U Function(U previousValue, T currentValue, [int currentIndex, int resultIndex]) callbackfn,
+  Tensor<T> input,
+  int dim,
+  [bool keepdim = false, U? initialValue]
+) {
+  final inputData = input.data;
+  final inputDims = input.dims;
+
+  // Negative indexing
+  dim = safeIndex(dim, inputDims.length);
+
+  // Calculate the shape of the resulting array after summation
+  final resultDims = inputDims.toList(); // Copy the original dimensions
+  resultDims[dim] = 1; // Remove the specified axis
+
+  // Create a new array to store the accumulated values
+  final result = List<U>.filled((inputData.length / inputDims[dim]).floor(), initialValue ?? 0 as U);
+
+  // Iterate over the data array
+  for (int i = 0; i < inputData.length; ++i) {
+    // Calculate the index in the resulting array
+    int resultIndex = 0;
+
+    for (int j = inputDims.length - 1, num = i, resultMultiplier = 1; j >= 0; --j) {
+      final size = inputDims[j];
+      if (j != dim) {
+        final index = num % size;
+        resultIndex += index * resultMultiplier;
+        resultMultiplier *= resultDims[j];
+      }
+      num = (num / size).floor();
+    }
+
+    // Accumulate the value at the current index
+    result[resultIndex] = callbackfn(result[resultIndex], inputData[i], i, resultIndex);
+  }
+
+  if (!keepdim) resultDims.removeAt(dim);
+
+  return (input.type, result, resultDims);
+}
+
 List<int> dimsToStride(List<int> dims) {
   final stride = List<int>.filled(dims.length, 0);
   for (int i = dims.length - 1, s2 = 1; i >= 0; --i) {
@@ -810,4 +991,48 @@ Future<Tensor<int>> zeros(List<int> size) async {
 /// @returns {Tensor} The zeros tensor.
 Future<Tensor<int>> zeros_like(Tensor tensor) async {
   return await zeros(tensor.dims);
+}
+
+enum QuantizeEmbeddingsPrecision { binary, ubinary }
+
+/// Quantizes the embeddings tensor to binary or unsigned binary precision.
+/// @param {Tensor} tensor The tensor to quantize.
+/// @param {'binary'|'ubinary'} precision The precision to use for quantization.
+/// @returns {Tensor} The quantized tensor.
+Future<Tensor> quantize_embeddings(Tensor tensor, QuantizeEmbeddingsPrecision precision) async {
+  if (tensor.dims.length != 2) {
+    throw ArgumentError("The tensor must have 2 dimensions");
+  }
+  if (tensor.dims.last % 8 != 0) {
+    throw ArgumentError("The last dimension of the tensor must be a multiple of 8");
+  }
+
+  final signed = precision == QuantizeEmbeddingsPrecision.binary;
+  final dtype = signed ? TensorDataType.int8 : TensorDataType.uint8;
+
+  // Create a typed array to store the packed bits
+  final inputData = tensor.data;
+  final outputData = List<int>.filled((inputData.length / 8).floor(), 0);
+
+  // Iterate over each number in the array
+  for (int i = 0; i < inputData.length; ++i) {
+    // Determine if the number is greater than 0
+    final bit = inputData[i] > 0 ? 1 : 0;
+
+    // Calculate the index in the typed array and the position within the byte
+    final arrayIndex = (i / 8).floor();
+    final bitPosition = i % 8;
+
+    // Pack the bit into the typed array
+    outputData[arrayIndex] |= bit << (7 - bitPosition);
+    if (signed && bitPosition == 0) {
+      outputData[arrayIndex] -= 128;
+    }
+  };
+
+  return await Tensor.create(
+    dtype,
+    outputData,
+    [tensor.dims[0], (tensor.dims[1] / 8).floor()],
+  );
 }

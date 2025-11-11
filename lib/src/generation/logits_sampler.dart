@@ -137,7 +137,7 @@ class MultinomialSampler extends LogitsSampler {
     final (v, i) = await topk(logits, k);
 
     // Compute softmax over logits
-    final probabilities = softmax(v.data as List<num>);
+    final probabilities = softmax(List<num>.from(v.data));
 
     return List.generate(generation_config.num_beams, (_) {
       final sampledIndex = randomSelect(probabilities);

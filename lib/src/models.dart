@@ -100,7 +100,7 @@ Future<(String, OrtSessionOptions, Map<String, dynamic>)> getSession(
     } else {
       dtype = DEFAULT_DEVICE_DTYPE_MAPPING[selectedDevice] ?? DataType.fp32;
       // console.warn
-      print('dtype not specified for "$fileName". Using the default dtype ($dtype) for this device ($selectedDevice).');
+      print('dtype not specified for "$fileName". Using the default dtype ($dtype) for this device (${selectedDevice.value}).');
     }
   }
 
@@ -136,7 +136,7 @@ Future<(String, OrtSessionOptions, Map<String, dynamic>)> getSession(
 
   // Only valid for models with a decoder
   final kv_cache_dtype_config = custom_config.kv_cache_dtype;
-  final kv_cache_dtype = kv_cache_dtype_config != null
+  final TensorDataType? kv_cache_dtype = kv_cache_dtype_config != null
       ? (kv_cache_dtype_config is TensorDataType
         ? kv_cache_dtype_config
         : kv_cache_dtype_config[selectedDtype] ?? TensorDataType.float32)
@@ -273,10 +273,10 @@ Future<(String, OrtSessionOptions, Map<String, dynamic>)> getSession(
 /// @returns {Promise<Record<string, any>>} A Promise that resolves to a dictionary of InferenceSession objects.
 /// @private
 Future<Map<String, OrtSession>> constructSessions(
-    String pretrained_model_name_or_path,
-    Map<String, String> names,
-    PretrainedModelOptions options,
-    ) async {
+  String pretrained_model_name_or_path,
+  Map<String, String> names,
+  PretrainedModelOptions options,
+) async {
   return Map.fromEntries(await Future.wait(
     names.keys.map((name) async {
       final (buffer_or_path, session_options, session_config) = await getSession(
@@ -729,7 +729,7 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
     generation_config,
   ) async {
     if (model_inputs['past_key_values'] != null) {
-      final past_key_value_dims = (model_inputs['past_key_values'].values as List<Tensor>)[0].dims;
+      final past_key_value_dims = List<Tensor>.from(model_inputs['past_key_values'].values).first.dims;
       final past_length = past_key_value_dims[past_key_value_dims.length - 2];
       final Tensor input_ids = model_inputs['input_ids'];
       final Tensor? attention_mask = model_inputs['attention_mask'];
@@ -933,9 +933,9 @@ Future<({Tensor inputs_embeds, dynamic attention_mask})> default_merge_input_ids
 /// ```
 /// @param {Tensor} attention_mask
 /// @returns {{data: BigInt64Array, dims: number[]}}
-(List<int>, List<int>) cumsum_masked_fill(Map<String, dynamic> attention_mask, [int start_index = 0]) {
-  final [int bz, int seq_len] = attention_mask['dims'];
-  final List<int> attn_mask_data = attention_mask['data'];
+(List<int>, List<int>) cumsum_masked_fill(Tensor attention_mask, [int start_index = 0]) {
+  final [int bz, int seq_len] = attention_mask.dims;
+  final List<int> attn_mask_data = List<int>.from(attention_mask.data);
 
   final List<int> data = List<int>.filled(attn_mask_data.length, 0);
   for (int i=0; i < bz; ++i) {
@@ -951,7 +951,7 @@ Future<({Tensor inputs_embeds, dynamic attention_mask})> default_merge_input_ids
       }
     }
   }
-  return (data, attention_mask['dims']);
+  return (data, attention_mask.dims);
 }
 
 /// If the model supports providing position_ids, we create position_ids on the fly for batch generation,
@@ -1114,7 +1114,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
   /// @returns {Promise<unknown[]>} An array of promises, one for each ONNX session that is being disposed.
   /// @todo Use https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/FinalizationRegistry
   Future<List<void>> dispose() async {
-    return await Future.wait(sessions.values.map((session) => session.close()));
+    return await Future.wait(sessions.values.map((session) => session.dispose()));
   }
 
   /// Helper method to setup [from_pretrained] with the correct [reflection] inserted.
@@ -1282,7 +1282,8 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
       ]);
     }
 
-    final [Map<String, OrtSession> sessions, Map<String, Map<String, dynamic>> configs] = info;
+    final Map<String, OrtSession> sessions = info.first;
+    final Map<String, Map<String, dynamic>> configs = info.length == 1 ? {} : info.last;
 
     return reflection.constructor(config, sessions, configs);
   }
@@ -1290,7 +1291,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
   /// Runs the model with the provided inputs
   /// @param {Object} model_inputs Object containing input tensors
   /// @returns {Promise<Object>} Object containing output tensors
-  Future<Map<String, Tensor>> call(Map<String, Tensor> model_inputs) async => await forward(model_inputs);
+  Future<Map<String, Tensor>> call(Map<String, dynamic> model_inputs) async => await forward(model_inputs);
 
   /// Forward method for a pretrained model. If not overridden by a subclass, the correct forward method
   /// will be chosen based on the model type.
@@ -1473,30 +1474,32 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
   /// @param {Object} kwargs Additional generation parameters to be used in place of those in the `generation_config` object.
   /// @returns {GenerationConfig} The final generation config object to be used by the model for text generation.
   GenerationConfig _prepare_generation_config(
-      GenerationConfig? generation_config,
-      Map<String, dynamic>? kwargs,
-      [GenerationConfig Function(Map<String, dynamic> json)? cls]
-      ) {
+    GenerationConfig? generation_config,
+    Map<String, dynamic>? kwargs,
+    [GenerationConfig Function(Map<String, dynamic> json)? cls]
+  ) {
+    cls ??= GenerationConfig.fromJson;
+
     // Create empty generation config (contains defaults)
     // We pass `this.config` so that if `eos_token_id` or `bos_token_id` exist in the model's config, we will use them
-    final Map<String, dynamic> config = { ...?this.config?.rawJson };
+    final Map<String, dynamic> config = { ...?this.config?.toJson() };
     for (final key in ['decoder', 'generator', 'text_config']) {
       // Special case: some models have generation attributes set in the decoder.
       // Use them if still unset in the generation config.
       if (config.containsKey(key)) {
-        config.addAll(config[key]);
+        config.addAll(config[key]..removeWhere((_, v) => v != null));
       }
     }
 
-    final gen_config = (cls?.call(config) ?? GenerationConfig()).toJson();
+    final gen_config = cls(config).toJson();
 
     // Apply model's generation config, if it exists
-    gen_config.addAll(this.generation_config?.toJson() ?? {});
+    gen_config.addAll((this.generation_config?.toJson() ?? {})..removeWhere((_, v) => v == null));
 
     // Next, use any generation config specified by the user
     // when calling `generate`
     if (generation_config != null) {
-      gen_config.addAll(generation_config.toJson());
+      gen_config.addAll(generation_config.toJson()..removeWhere((_, v) => v == null));
     }
 
     // Finally, if any kwargs were passed, use them to overwrite
@@ -1505,19 +1508,22 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
       // should work since gen_config should have all the properties of the
       // class set which means toJson() should contain all the keys as the
       // property names.
-      gen_config.addAll(pick(kwargs, gen_config.keys.toList()));
+      gen_config.addAll(pick(
+        kwargs,
+        cls({}).toJson().keys.toList(),
+      )..removeWhere((_, v) => v == null));
     }
 
-    return GenerationConfig.fromJson(gen_config);
+    return cls(gen_config);
   }
 
   ///
   /// @param {GenerationConfig} generation_config
   /// @param {StoppingCriteriaList} [stopping_criteria=null]
   StoppingCriteriaList _get_stopping_criteria(
-      GenerationConfig generation_config,
-      [StoppingCriteriaList? stopping_criteria]
-      ) {
+    GenerationConfig generation_config,
+    [StoppingCriteriaList? stopping_criteria]
+  ) {
     final criteria = StoppingCriteriaList();
 
     if (generation_config.max_length != null) {
@@ -1628,12 +1634,16 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
   /// @param {number} [params.bos_token_id=null]
   /// @param {Record<string, Tensor|number[]>} [params.model_kwargs]
   /// @returns {{inputs_tensor: Tensor, model_inputs: Record<string, Tensor>, model_input_name: string}} The model-specific inputs for generation.
-  (Tensor?, Map<String, Tensor>, String) _prepare_model_inputs({
+  ({
+    Tensor? inputs_tensor,
+    Map<String, dynamic> model_inputs,
+    String input_name,
+  }) _prepare_model_inputs({
     Tensor? inputs,
     int? bos_token_id,
     Map<String, dynamic> model_kwargs = const {},
   }) {
-    final model_inputs = pick<Tensor>(model_kwargs, forward_params);
+    final Map<String, dynamic> model_inputs = pick(model_kwargs, forward_params);
     final input_name = main_input_name;
     if (model_inputs.containsKey(input_name)) {
       if (inputs != null) {
@@ -1650,7 +1660,11 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
 
     final inputs_tensor = model_inputs[input_name];
 
-    return (inputs_tensor, model_inputs, input_name);
+    return (
+      inputs_tensor: inputs_tensor,
+      model_inputs: model_inputs,
+      input_name: input_name,
+    );
   }
 
   /// TODO: Add types
@@ -1789,9 +1803,9 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
       inputs: inputs,
       model_kwargs: kwargs,
     );
-    final inputs_tensor = preparedModelInputs.$1;
-    Map<String, dynamic> model_inputs = preparedModelInputs.$2;
-    final model_input_name = preparedModelInputs.$3;
+    final inputs_tensor = preparedModelInputs.inputs_tensor;
+    Map<String, dynamic> model_inputs = preparedModelInputs.model_inputs;
+    final model_input_name = preparedModelInputs.input_name;
 
     final is_encoder_decoder = config?.is_encoder_decoder;
 
@@ -1815,7 +1829,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
     if (is_encoder_decoder ?? false) {
       // Generating from the encoder outputs
       final preparedDecoderInputIds = await _prepare_decoder_input_ids_for_generation({
-        'batch_size': model_inputs[model_input_name]?.dims[0],
+        'batch_size': (model_inputs[model_input_name] as Tensor?)?.dims.first,
         'model_input_name': model_input_name,
         'model_kwargs': model_inputs,
         'decoder_start_token_id': generation_config.decoder_start_token_id,
@@ -1873,7 +1887,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
     //     eos_token_ids = [eos_token_ids];
     // }
 
-    final numInputs = model_inputs[model_input_name]!.dims.first;
+    final numInputs = (model_inputs[model_input_name]! as Tensor).dims.first;
 
     // Below was commented out in transformers.js:
     // TODO:
@@ -2075,10 +2089,9 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
     if (pastKeyValues != null) {
       decoderFeeds.addAll(pastKeyValues);
     } else {
-      // final session = sessions['decoder_model_merged'] ?? sessions['model'];
-      // Unfortunately, flutter_onnxruntime doesn't expose the kv_cache_dtype so we'll default to float32
-      // final dtype = session?.config?.kv_cache_dtype ?? 'float32';
-      final dtype = TensorDataType.float32;
+      // TODO: Unfortunately, flutter_onnxruntime doesn't actually expose this config we add it on using extensions
+      final session = sessions['decoder_model_merged'] ?? sessions['model'];
+      final dtype = session?.config['kv_cache_dtype'] ?? 'float32';
       final empty = [];
 
       final batch_size = (
@@ -2108,6 +2121,134 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
   }
 }
 
+//////////////////////////////////////////////////
+// Base model output class
+class ModelOutput {}
+
+//////////////////////////////////////////////////
+// Bert models
+class BertPreTrainedModel extends PreTrainedModel {
+  BertPreTrainedModel(super.reflection, super.config, super.sessions, super.configs);
+}
+class BertModel extends BertPreTrainedModel {
+  @override
+  final PreTrainedModelReflection reflection = _reflection;
+
+  static final PreTrainedModelReflection _reflection = PreTrainedModelReflection(
+    type: BertModel,
+    constructor: constructor,
+  );
+
+  static PreTrainedModel constructor(
+    PretrainedConfig? config,
+    Map<String, OrtSession> sessions,
+    Map<String, Map<String, dynamic>> configs,
+  ) => BertModel(_reflection, config, sessions, configs);
+
+  static final ModelClassInfo modelClassInfo = ModelClassInfo(
+    BertModel,
+    PreTrainedModel.setup_from_pretrained(_reflection),
+  );
+
+  BertModel(super.reflection, super.config, super.sessions, super.configs);
+}
+
+/// BertForMaskedLM is a class representing a BERT model for masked language modeling.
+class BertForMaskedLM extends BertPreTrainedModel {
+  @override
+  final PreTrainedModelReflection reflection = _reflection;
+
+  static final PreTrainedModelReflection _reflection = PreTrainedModelReflection(
+    type: BertForMaskedLM,
+    constructor: constructor,
+  );
+
+  static PreTrainedModel constructor(
+    PretrainedConfig? config,
+    Map<String, OrtSession> sessions,
+    Map<String, Map<String, dynamic>> configs,
+  ) => BertForMaskedLM(_reflection, config, sessions, configs);
+
+  static final ModelClassInfo modelClassInfo = ModelClassInfo(
+    BertForMaskedLM,
+    PreTrainedModel.setup_from_pretrained(_reflection),
+  );
+
+  BertForMaskedLM(super.reflection, super.config, super.sessions, super.configs);
+
+  /// Calls the model on new inputs.
+  ///
+  /// @param {Object} model_inputs The inputs to the model.
+  /// @returns {Promise<MaskedLMOutput>} An object containing the model's output logits for masked language modeling.
+  /// TODO: Because [PreTrainedModel]'s [call] return type is [Map<String, Tensor>] we can't use [MaskedLMOutput]. Maybe we should update this?
+  @override
+  Future<Map<String, Tensor>> call(Map<String, dynamic> model_inputs) async {
+    return { 'logits': MaskedLMOutput(await super.call(model_inputs)).logits };
+  }
+}
+//////////////////////////////////////////////////
+
+//////////////////////////////////////////////////
+// XLMRoberta models
+class XLMRobertaPreTrainedModel extends PreTrainedModel {
+  XLMRobertaPreTrainedModel(super.reflection, super.config, super.sessions, super.configs);
+}
+class XLMRobertaModel extends XLMRobertaPreTrainedModel {
+  @override
+  final PreTrainedModelReflection reflection = _reflection;
+
+  static final PreTrainedModelReflection _reflection = PreTrainedModelReflection(
+    type: XLMRobertaModel,
+    constructor: constructor,
+  );
+
+  static PreTrainedModel constructor(
+    PretrainedConfig? config,
+    Map<String, OrtSession> sessions,
+    Map<String, Map<String, dynamic>> configs,
+  ) => XLMRobertaModel(_reflection, config, sessions, configs);
+
+  static final ModelClassInfo modelClassInfo = ModelClassInfo(
+    XLMRobertaModel,
+    PreTrainedModel.setup_from_pretrained(_reflection),
+  );
+
+  XLMRobertaModel(super.reflection, super.config, super.sessions, super.configs);
+}
+
+/// XLMRobertaForMaskedLM class for performing masked language modeling on XLMRoberta models.
+class XLMRobertaForMaskedLM extends XLMRobertaPreTrainedModel {
+  @override
+  final PreTrainedModelReflection reflection = _reflection;
+
+  static final PreTrainedModelReflection _reflection = PreTrainedModelReflection(
+    type: XLMRobertaForMaskedLM,
+    constructor: constructor,
+  );
+
+  static PreTrainedModel constructor(
+    PretrainedConfig? config,
+    Map<String, OrtSession> sessions,
+    Map<String, Map<String, dynamic>> configs,
+  ) => XLMRobertaForMaskedLM(_reflection, config, sessions, configs);
+
+  static final ModelClassInfo modelClassInfo = ModelClassInfo(
+    XLMRobertaForMaskedLM,
+    PreTrainedModel.setup_from_pretrained(_reflection),
+  );
+
+  XLMRobertaForMaskedLM(super.reflection, super.config, super.sessions, super.configs);
+
+  /// Calls the model on new inputs.
+  ///
+  /// @param {Object} model_inputs The inputs to the model.
+  /// @returns {Promise<MaskedLMOutput>} returned object
+  /// TODO: Because [PreTrainedModel]'s [call] return type is [Map<String, Tensor>] we can't use [MaskedLMOutput]. Maybe we should update this?
+  @override
+  Future<Map<String, Tensor>> call(Map<String, dynamic> model_inputs) async {
+    return { 'logits': MaskedLMOutput(await super.call(model_inputs)).logits };
+  }
+}
 //////////////////////////////////////////////////
 
 //////////////////////////////////////////////////
@@ -2173,6 +2314,151 @@ class Idefics3ForConditionalGeneration extends Idefics3PreTrainedModel {
       'image_features': reshaped_image_hidden_states,
     });
   }
+}
+//////////////////////////////////////////////////
+
+//////////////////////////////////////////////////
+// GPT2 models
+class GPT2PreTrainedModel extends PreTrainedModel {
+  GPT2PreTrainedModel(super.reflection, super.config, super.sessions, super.configs);
+}
+
+class GPT2Model extends GPT2PreTrainedModel {
+  GPT2Model(super.reflection, super.config, super.sessions, super.configs);
+}
+
+/// GPT-2 language model head on top of the GPT-2 base model. This model is suitable for text generation tasks.
+class GPT2LMHeadModel extends GPT2PreTrainedModel {
+  @override
+  final PreTrainedModelReflection reflection = _reflection;
+
+  static final PreTrainedModelReflection _reflection = PreTrainedModelReflection(
+    type: GPT2LMHeadModel,
+    constructor: constructor,
+  );
+
+  static PreTrainedModel constructor(
+    PretrainedConfig? config,
+    Map<String, OrtSession> sessions,
+    Map<String, Map<String, dynamic>> configs,
+  ) => GPT2LMHeadModel(_reflection, config, sessions, configs);
+
+  static final ModelClassInfo modelClassInfo = ModelClassInfo(
+    GPT2LMHeadModel,
+    PreTrainedModel.setup_from_pretrained(_reflection),
+  );
+
+  GPT2LMHeadModel(super.reflection, super.config, super.sessions, super.configs);
+}
+// export class GPT2ForSequenceClassification extends GPT2PreTrainedModel {
+// TODO
+// }
+//////////////////////////////////////////////////
+
+//////////////////////////////////////////////////
+// GraniteMoeHybrid models
+class GraniteMoeHybridPreTrainedModel extends PreTrainedModel {
+  GraniteMoeHybridPreTrainedModel(super.reflection, super.config, super.sessions, super.configs);
+}
+class GraniteMoeHybridModel extends GraniteMoeHybridPreTrainedModel {
+  @override
+  final PreTrainedModelReflection reflection = _reflection;
+
+  static final PreTrainedModelReflection _reflection = PreTrainedModelReflection(
+    type: GraniteMoeHybridModel,
+    constructor: constructor,
+  );
+
+  static PreTrainedModel constructor(
+    PretrainedConfig? config,
+    Map<String, OrtSession> sessions,
+    Map<String, Map<String, dynamic>> configs,
+  ) => GraniteMoeHybridModel(_reflection, config, sessions, configs);
+
+  static final ModelClassInfo modelClassInfo = ModelClassInfo(
+    GraniteMoeHybridModel,
+    PreTrainedModel.setup_from_pretrained(_reflection),
+  );
+
+  GraniteMoeHybridModel(super.reflection, super.config, super.sessions, super.configs);
+}
+class GraniteMoeHybridForCausalLM extends GraniteMoeHybridPreTrainedModel {
+  @override
+  final PreTrainedModelReflection reflection = _reflection;
+
+  static final PreTrainedModelReflection _reflection = PreTrainedModelReflection(
+    type: GraniteMoeHybridForCausalLM,
+    constructor: constructor,
+  );
+
+  static PreTrainedModel constructor(
+    PretrainedConfig? config,
+    Map<String, OrtSession> sessions,
+    Map<String, Map<String, dynamic>> configs,
+  ) => GraniteMoeHybridForCausalLM(_reflection, config, sessions, configs);
+
+  static final ModelClassInfo modelClassInfo = ModelClassInfo(
+    GraniteMoeHybridForCausalLM,
+    PreTrainedModel.setup_from_pretrained(_reflection),
+  );
+
+  GraniteMoeHybridForCausalLM(super.reflection, super.config, super.sessions, super.configs);
+}
+//////////////////////////////////////////////////
+
+//////////////////////////////////////////////////
+// Qwen3 models
+
+/// The bare Qwen3 Model outputting raw hidden-states without any specific head on top.
+class Qwen3PreTrainedModel extends PreTrainedModel {
+  Qwen3PreTrainedModel(super.reflection, super.config, super.sessions, super.configs);
+}
+
+/// The bare Qwen3 Model outputting raw hidden-states without any specific head on top.
+class Qwen3Model extends Qwen3PreTrainedModel {
+  @override
+  final PreTrainedModelReflection reflection = _reflection;
+
+  static final PreTrainedModelReflection _reflection = PreTrainedModelReflection(
+    type: Qwen3Model,
+    constructor: constructor,
+  );
+
+  static PreTrainedModel constructor(
+    PretrainedConfig? config,
+    Map<String, OrtSession> sessions,
+    Map<String, Map<String, dynamic>> configs,
+  ) => Qwen3Model(_reflection, config, sessions, configs);
+
+  static final ModelClassInfo modelClassInfo = ModelClassInfo(
+    Qwen3Model,
+    PreTrainedModel.setup_from_pretrained(_reflection),
+  );
+
+  Qwen3Model(super.reflection, super.config, super.sessions, super.configs);
+}
+
+class Qwen3ForCausalLM extends Qwen3PreTrainedModel {
+  @override
+  final PreTrainedModelReflection reflection = _reflection;
+
+  static final PreTrainedModelReflection _reflection = PreTrainedModelReflection(
+    type: Qwen3ForCausalLM,
+    constructor: constructor,
+  );
+
+  static PreTrainedModel constructor(
+    PretrainedConfig? config,
+    Map<String, OrtSession> sessions,
+    Map<String, Map<String, dynamic>> configs,
+  ) => Qwen3ForCausalLM(_reflection, config, sessions, configs);
+
+  static final ModelClassInfo modelClassInfo = ModelClassInfo(
+    Qwen3ForCausalLM,
+    PreTrainedModel.setup_from_pretrained(_reflection),
+  );
+
+  Qwen3ForCausalLM(super.reflection, super.config, super.sessions, super.configs);
 }
 //////////////////////////////////////////////////
 
@@ -2282,7 +2568,7 @@ class ModelClassInfo {
 }
 
 final Map<String, (String, ModelClassInfo)> MODEL_MAPPING_NAMES_ENCODER_ONLY = {
-  // 'bert': ('BertModel', BertModel.modelClassInfo),
+  'bert': ('BertModel', BertModel.modelClassInfo),
   // 'modernbert': ('ModernBertModel', ModernBertModel.modelClassInfo),
   // 'nomic_bert': ('NomicBertModel', NomicBertModel.modelClassInfo),
   // 'roformer': ('RoFormerModel', RoFormerModel.modelClassInfo),
@@ -2297,7 +2583,7 @@ final Map<String, (String, ModelClassInfo)> MODEL_MAPPING_NAMES_ENCODER_ONLY = {
   // 'distilbert': ('DistilBertModel', DistilBertModel.modelClassInfo),
   // 'roberta': ('RobertaModel', RobertaModel.modelClassInfo),
   // 'xlm': ('XLMModel', XLMModel.modelClassInfo),
-  // 'xlm-roberta': ('XLMRobertaModel', XLMRobertaModel.modelClassInfo),
+  'xlm-roberta': ('XLMRobertaModel', XLMRobertaModel.modelClassInfo),
   // 'clap': ('ClapModel', ClapModel.modelClassInfo),
   // 'clip': ('CLIPModel', CLIPModel.modelClassInfo),
   // 'clipseg': ('CLIPSegModel', CLIPSegModel.modelClassInfo),
@@ -2401,6 +2687,7 @@ final Map<String, (String, ModelClassInfo)> MODEL_MAPPING_NAMES_DECODER_ONLY = {
   // 'olmo2': ('Olmo2Model', Olmo2Model.modelClassInfo),
   // 'mobilellm': ('MobileLLMModel', MobileLLMModel.modelClassInfo),
   // 'granite': ('GraniteModel', GraniteModel.modelClassInfo),
+  'granitemoehybrid': ('GraniteMoeHybridModel', GraniteMoeHybridModel.modelClassInfo),
   // 'cohere': ('CohereModel', CohereModel.modelClassInfo),
   // 'gemma': ('GemmaModel', GemmaModel.modelClassInfo),
   // 'gemma2': ('Gemma2Model', Gemma2Model.modelClassInfo),
@@ -2409,7 +2696,7 @@ final Map<String, (String, ModelClassInfo)> MODEL_MAPPING_NAMES_DECODER_ONLY = {
   // 'glm': ('GlmModel', GlmModel.modelClassInfo),
   // 'openelm': ('OpenELMModel', OpenELMModel.modelClassInfo),
   // 'qwen2': ('Qwen2Model', Qwen2Model.modelClassInfo),
-  // 'qwen3': ('Qwen3Model', Qwen3Model.modelClassInfo),
+  'qwen3': ('Qwen3Model', Qwen3Model.modelClassInfo),
   // 'phi': ('PhiModel', PhiModel.modelClassInfo),
   // 'phi3': ('Phi3Model', Phi3Model.modelClassInfo),
   // 'mpt': ('MptModel', MptModel.modelClassInfo),
@@ -2487,9 +2774,9 @@ const Map<String, (String, ModelClassInfo)> MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPI
   // 'blenderbot-small': ('BlenderbotSmallForConditionalGeneration', BlenderbotSmallForConditionalGeneration.modelClassInfo),
 };
 
-const Map<String, (String, ModelClassInfo)> MODEL_FOR_CAUSAL_LM_MAPPING_NAMES = {
+final Map<String, (String, ModelClassInfo)> MODEL_FOR_CAUSAL_LM_MAPPING_NAMES = {
   // 'bloom': ('BloomForCausalLM', BloomForCausalLM.modelClassInfo),
-  // 'gpt2': ('GPT2LMHeadModel', GPT2LMHeadModel.modelClassInfo),
+  'gpt2': ('GPT2LMHeadModel', GPT2LMHeadModel.modelClassInfo),
   // 'jais': ('JAISLMHeadModel', JAISLMHeadModel.modelClassInfo),
   // 'gptj': ('GPTJForCausalLM', GPTJForCausalLM.modelClassInfo),
   // 'gpt_bigcode': ('GPTBigCodeForCausalLM', GPTBigCodeForCausalLM.modelClassInfo),
@@ -2502,6 +2789,7 @@ const Map<String, (String, ModelClassInfo)> MODEL_FOR_CAUSAL_LM_MAPPING_NAMES = 
   // 'olmo2': ('Olmo2ForCausalLM', Olmo2ForCausalLM.modelClassInfo),
   // 'mobilellm': ('MobileLLMForCausalLM', MobileLLMForCausalLM.modelClassInfo),
   // 'granite': ('GraniteForCausalLM', GraniteForCausalLM.modelClassInfo),
+  'granitemoehybrid': ('GraniteMoeHybridForCausalLM', GraniteMoeHybridForCausalLM.modelClassInfo),
   // 'cohere': ('CohereForCausalLM', CohereForCausalLM.modelClassInfo),
   // 'gemma': ('GemmaForCausalLM', GemmaForCausalLM.modelClassInfo),
   // 'gemma2': ('Gemma2ForCausalLM', Gemma2ForCausalLM.modelClassInfo),
@@ -2510,7 +2798,7 @@ const Map<String, (String, ModelClassInfo)> MODEL_FOR_CAUSAL_LM_MAPPING_NAMES = 
   // 'glm': ('GlmForCausalLM', GlmForCausalLM.modelClassInfo),
   // 'openelm': ('OpenELMForCausalLM', OpenELMForCausalLM.modelClassInfo),
   // 'qwen2': ('Qwen2ForCausalLM', Qwen2ForCausalLM.modelClassInfo),
-  // 'qwen3': ('Qwen3ForCausalLM', Qwen3ForCausalLM.modelClassInfo),
+  'qwen3': ('Qwen3ForCausalLM', Qwen3ForCausalLM.modelClassInfo),
   // 'phi': ('PhiForCausalLM', PhiForCausalLM.modelClassInfo),
   // 'phi3': ('Phi3ForCausalLM', Phi3ForCausalLM.modelClassInfo),
   // 'mpt': ('MptForCausalLM', MptForCausalLM.modelClassInfo),
@@ -2532,7 +2820,7 @@ final Map<String, (String, ModelClassInfo)> MODEL_FOR_MULTIMODALITY_MAPPING_NAME
 
 
 final Map<String, (String, ModelClassInfo)> MODEL_FOR_MASKED_LM_MAPPING_NAMES = {
-  // 'bert': ('BertForMaskedLM', BertForMaskedLM.modelClassInfo),
+  'bert': ('BertForMaskedLM', BertForMaskedLM.modelClassInfo),
   // 'modernbert': ('ModernBertForMaskedLM', ModernBertForMaskedLM.modelClassInfo),
   // 'roformer': ('RoFormerForMaskedLM', RoFormerForMaskedLM.modelClassInfo),
   // 'electra': ('ElectraForMaskedLM', ElectraForMaskedLM.modelClassInfo),
@@ -2546,7 +2834,7 @@ final Map<String, (String, ModelClassInfo)> MODEL_FOR_MASKED_LM_MAPPING_NAMES = 
   // 'distilbert': ('DistilBertForMaskedLM', DistilBertForMaskedLM.modelClassInfo),
   // 'roberta': ('RobertaForMaskedLM', RobertaForMaskedLM.modelClassInfo),
   // 'xlm': ('XLMWithLMHeadModel', XLMWithLMHeadModel.modelClassInfo),
-  // 'xlm-roberta': ('XLMRobertaForMaskedLM', XLMRobertaForMaskedLM.modelClassInfo),
+  'xlm-roberta': ('XLMRobertaForMaskedLM', XLMRobertaForMaskedLM.modelClassInfo),
   // 'mobilebert': ('MobileBertForMaskedLM', MobileBertForMaskedLM.modelClassInfo),
   // 'squeezebert': ('SqueezeBertForMaskedLM', SqueezeBertForMaskedLM.modelClassInfo),
 };
@@ -2837,6 +3125,79 @@ void setupModelMappings() {
   setupCustomArchitecturesMapping();
 }
 
+/// Helper class which is used to instantiate pretrained models with the `from_pretrained` function.
+/// The chosen model class is determined by the type specified in the model config.
+///
+/// @example
+/// let model = await AutoModel.from_pretrained('Xenova/bert-base-uncased');
+class AutoModel {
+  static final List<Map<String, (String, ModelClassInfo)>>? MODEL_CLASS_MAPPINGS = MODEL_CLASS_TYPE_MAPPING
+      .map((x) => x.$1).toList();
+
+  static bool BASE_IF_FAIL = true;
+
+  static final _reflection = PretrainedReflection(
+    name: AutoModel,
+    MODEL_CLASS_MAPPINGS: MODEL_CLASS_MAPPINGS,
+    BASE_IF_FAIL: BASE_IF_FAIL,
+  );
+
+  static Future<PreTrainedModel> from_pretrained(
+    String pretrained_model_name_or_path,
+    [PretrainedOptions? options]
+  ) async {
+    return await PretrainedMixin.from_pretrained(_reflection, pretrained_model_name_or_path, options);
+  }
+}
+
+/// Helper class which is used to instantiate pretrained causal language models with the `from_pretrained` function.
+/// The chosen model class is determined by the type specified in the model config.
+///
+/// @example
+/// let model = await AutoModelForCausalLM.from_pretrained('Xenova/gpt2');
+class AutoModelForCausalLM {
+  static final List<Map<String, (String, ModelClassInfo)>>? MODEL_CLASS_MAPPINGS = [MODEL_FOR_CAUSAL_LM_MAPPING_NAMES];
+
+  static bool BASE_IF_FAIL = false;
+
+  static final _reflection = PretrainedReflection(
+    name: AutoModelForCausalLM,
+    MODEL_CLASS_MAPPINGS: MODEL_CLASS_MAPPINGS,
+    BASE_IF_FAIL: BASE_IF_FAIL,
+  );
+
+  static Future<PreTrainedModel> from_pretrained(
+    String pretrained_model_name_or_path,
+    [PretrainedOptions? options]
+  ) async {
+    return await PretrainedMixin.from_pretrained(_reflection, pretrained_model_name_or_path, options);
+  }
+}
+
+/// Helper class which is used to instantiate pretrained masked language models with the `from_pretrained` function.
+/// The chosen model class is determined by the type specified in the model config.
+///
+/// @example
+/// let model = await AutoModelForMaskedLM.from_pretrained('Xenova/bert-base-uncased');
+class AutoModelForMaskedLM {
+  static final List<Map<String, (String, ModelClassInfo)>>? MODEL_CLASS_MAPPINGS = [MODEL_FOR_MASKED_LM_MAPPING_NAMES];
+
+  static bool BASE_IF_FAIL = false;
+
+  static final _reflection = PretrainedReflection(
+    name: AutoModelForMaskedLM,
+    MODEL_CLASS_MAPPINGS: MODEL_CLASS_MAPPINGS,
+    BASE_IF_FAIL: BASE_IF_FAIL,
+  );
+
+  static Future<PreTrainedModel> from_pretrained(
+    String pretrained_model_name_or_path,
+    [PretrainedOptions? options]
+  ) async {
+    return await PretrainedMixin.from_pretrained(_reflection, pretrained_model_name_or_path, options);
+  }
+}
+
 // /// Helper class which is used to instantiate pretrained token classification models with the `from_pretrained` function.
 // /// The chosen model class is determined by the type specified in the model config.
 // ///
@@ -2868,4 +3229,13 @@ class AutoModelForVision2Seq {
   ) async {
     return await PretrainedMixin.from_pretrained(_reflection, pretrained_model_name_or_path, options);
   }
+}
+
+/// Base class for masked language models outputs.
+class MaskedLMOutput extends ModelOutput {
+  Tensor logits;
+
+  /// @param {Object} output The output of the model.
+  /// @param {Tensor} output.logits Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
+  MaskedLMOutput(Map<String, dynamic> output) : logits = output['logits'];
 }

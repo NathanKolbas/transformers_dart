@@ -1,12 +1,16 @@
 // This is the main entry point for the library.
 // It exports the public-facing functions and classes.
 
+export 'src/pipelines.dart';
 export 'src/tokenizers.dart';
 export 'src/generation/streamers.dart';
+export 'src/utils/devices.dart';
 export 'src/utils/dtypes.dart';
+export 'src/utils/hub.dart';
 export 'src/utils/image.dart';
 export 'src/utils/tensor.dart';
 
+import 'package:huggingface_hub/huggingface_hub.dart';
 import 'package:transformers/src/models.dart';
 
 class Transformers {
@@ -40,6 +44,9 @@ class Transformers {
 
     try {
       setupModelMappings();
+      await HuggingfaceHub.ensureInitialized(
+        throwOnFail: throwOnFail,
+      );
 
       Transformers._instance._initialized = true;
       return Transformers._instance._initialized;

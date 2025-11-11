@@ -54,7 +54,7 @@ class PretrainedOptions {
     this.revision = 'main',
   });
 
-  factory PretrainedOptions.fromJson(Map<String, dynamic> json) => PretrainedModelOptions(
+  factory PretrainedOptions.fromJson(Map<String, dynamic> json) => PretrainedOptions(
     progress_callback: json['progress_callback'],
     config: json['config'],
     cache_dir: json['cache_dir'],

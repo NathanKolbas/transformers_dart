@@ -88,6 +88,7 @@ class Idefics3ImageProcessor extends ImageProcessor {
         final List<int> image_cols = List.filled(images_list.length, 0);
 
         // We first resize both height and width of each image to the nearest max_image_size multiple, disregarding the aspect ratio
+        // TODO: This is slow... Like almost a minute slow
         images_tensor = await Future.wait(images_list.indexed.map((e) async {
           final (i, x) = e;
           final new_size = get_resize_for_vision_encoder(x.pixel_values, longest_edge);

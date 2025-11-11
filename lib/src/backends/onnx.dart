@@ -78,6 +78,39 @@ extension OrtSessionOptionsEx on OrtSessionOptions {
   Map<String, dynamic> toJson() => toMap();
 }
 
+extension OnnxRuntimeEx on OnnxRuntime {
+  /// TODO: This is more of a stop gap until we can actually store more config information
+  ///
+  /// We need to store some extra information about each Ort sessions so we will
+  /// store them here.
+  ///
+  /// Extensions cannot declare fields so we will store each config in here.
+  static final Map<OrtSession, Map<String, dynamic>> _configs = {};
+
+  /// Create an ONNX Runtime session with the given model path
+  Future<OrtSession> createSessionWithConfig(
+    String modelPath,
+    {OrtSessionOptions? options, Map<String, dynamic>? config}
+  ) async {
+    final session = await createSession(modelPath, options: options);
+    _configs[session] = config ?? {};
+    return session;
+  }
+
+  Future<void> dispose() async {
+    OnnxRuntimeEx._configs.clear();
+  }
+}
+
+extension OrtSessionEx on OrtSession {
+  Map<String, dynamic> get config => OnnxRuntimeEx._configs[this] ?? {};
+
+  Future<void> dispose() async {
+    OnnxRuntimeEx._configs.remove(this);
+    await close();
+  }
+}
+
 /// This is a wrapper class around the flutter_onnxruntime [OrtValue] to make
 /// things easier to work with.
 class Tensor<T> {
@@ -337,14 +370,22 @@ Future<OrtSession> createInferenceSession(
 ) async {
   // TODO: session_config is not currently used. Should it be? How would it be used?
   if (buffer_or_path is String) {
-    return await ort.createSession(buffer_or_path, options: session_options);
+    return await ort.createSessionWithConfig(
+      buffer_or_path,
+      options: session_options,
+      config: session_config,
+    );
   }
 
   return await createInferenceSessionBytes(buffer_or_path, session_options);
 }
 
 /// Create sn ONNX Runtime session with the given bytes as the model
-Future<OrtSession> createInferenceSessionBytes(List<int> buffer, OrtSessionOptions sessionOptions) async {
+Future<OrtSession> createInferenceSessionBytes(
+  List<int> buffer,
+  OrtSessionOptions sessionOptions,
+  [Map<String, dynamic>? session_config]
+) async {
   // The flutter_onnxruntime package doesn't have a way to load a model from
   // memory so we will first save it to a path and load it from there
   final Directory tempDir = await getTemporaryDirectory();
@@ -357,7 +398,7 @@ Future<OrtSession> createInferenceSessionBytes(List<int> buffer, OrtSessionOptio
     await modelFile.writeAsBytes(buffer);
   }
 
-  return await ort.createSession(modelFile.path, options: sessionOptions);
+  return await ort.createSessionWithConfig(modelFile.path, options: sessionOptions, config: session_config);
 }
 
 /// TODO: This is not implemented and will always be false

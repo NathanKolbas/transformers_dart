@@ -109,7 +109,7 @@ class Processor {
 
   /// @param {Parameters<PreTrainedTokenizer['batch_decode']>} args
   /// @returns {ReturnType<PreTrainedTokenizer['batch_decode']>}
-  List<String> batch_decode(List<List<int>> batch, {
+  List<String> batch_decode(dynamic batch, {
     bool skip_special_tokens = false,
     bool clean_up_tokenization_spaces = true,
   }) {
@@ -117,6 +117,7 @@ class Processor {
     if (tokenizer == null) {
       throw StateError('Unable to decode without a tokenizer.');
     }
+
     return tokenizer.batch_decode(
       batch,
       clean_up_tokenization_spaces: clean_up_tokenization_spaces,

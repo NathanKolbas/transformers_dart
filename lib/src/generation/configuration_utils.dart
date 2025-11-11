@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:transformers/src/generation/streamers.dart';
 
 /// Class that holds a configuration for a generation task.
@@ -450,4 +452,7 @@ class GenerationConfig {
     'decoder_start_token_id': decoder_start_token_id,
     'generation_kwargs': generation_kwargs,
   };
+
+  @override
+  String toString() => jsonEncode(toJson());
 }
