@@ -2907,8 +2907,8 @@ class PreTrainedTokenizer {
       batch = batch.tolist();
     }
 
-    return (batch as List<dynamic>)
-        .map((x) => List<int>.from(x))
+    return (batch as List)
+        .map((x) => (x as List).cast<int>())
         .map((x) => decode(
       x,
       skip_special_tokens: skip_special_tokens,
@@ -2933,7 +2933,7 @@ class PreTrainedTokenizer {
     clean_up_tokenization_spaces ??= true;
 
     if (token_ids is Tensor) {
-      token_ids = List<int>.from(prepareTensorForDecode(token_ids));
+      token_ids = prepareTensorForDecode(token_ids).cast<int>();
     }
 
     if (token_ids is! List<int> || token_ids.isEmpty || !isIntegralNumber(token_ids.first)) {

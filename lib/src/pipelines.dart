@@ -1,3 +1,5 @@
+import 'dart:developer';
+
 import 'package:transformers/src/base/processing_utils.dart';
 import 'package:transformers/src/generation/configuration_utils.dart';
 import 'package:transformers/src/models.dart';
@@ -120,7 +122,7 @@ class FillMaskPipeline extends Pipeline {
     final List toReturn = [];
     final List<List<int>> input_ids = (model_inputs.input_ids as Tensor)
         .tolist()
-        .map((x) => List<int>.from(x))
+        .map((x) => (x as List).cast<int>())
         .toList();
     for (int i = 0; i < input_ids.length; ++i) {
       final ids = input_ids[i];
@@ -132,11 +134,11 @@ class FillMaskPipeline extends Pipeline {
 
       final scores = await topk(await Tensor.create(
         TensorDataType.float32,
-        softmax(List<num>.from(itemLogits.data)),
+        softmax(itemLogits.data.cast<num>()),
         itemLogits.dims,
       ), top_k);
       final values = scores.$1.tolist();
-      final indices = List<int>.from(scores.$2.tolist());
+      final indices = scores.$2.tolist().cast<int>();
 
       toReturn.add(indices.indexed.map((e) {
         final (i, x) = e;

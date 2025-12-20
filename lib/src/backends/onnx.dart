@@ -1,119 +1,43 @@
-import 'dart:io';
-import 'dart:typed_data';
+import 'dart:collection';
 
-import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
-import 'package:path/path.dart' as path;
-import 'package:path_provider/path_provider.dart';
+import 'package:ort/ort.dart' hide Tensor, DeviceType;
+import 'package:ort/ort.dart' as ort;
 import 'package:transformers/src/utils/devices.dart';
 import 'package:transformers/src/utils/tensor.dart' show TensorDataType;
 
-final OnnxRuntime ort = OnnxRuntime();
-
 /// @type {Record<import("../utils/devices.js").DeviceType, ONNXExecutionProviders>}
-const Map<DeviceType, OrtProvider?> DEVICE_TO_EXECUTION_PROVIDER_MAPPING = {
+final Map<DeviceType, ExecutionProvider?> DEVICE_TO_EXECUTION_PROVIDER_MAPPING = {
   DeviceType.auto: null, // Auto-detect based on device and environment
   DeviceType.gpu: null, // Auto-detect GPU
-  DeviceType.cpu: OrtProvider.CPU, // CPU
-  DeviceType.wasm: OrtProvider.WEB_ASSEMBLY, // WebAssembly
-  DeviceType.webgpu: OrtProvider.WEB_GPU, // WebGPU
-  DeviceType.cuda: OrtProvider.CUDA, // CUDA
-  DeviceType.dml: OrtProvider.DIRECT_ML, // DirectML
+  DeviceType.cpu: CPUExecutionProvider(), // CPU
+  DeviceType.wasm: null, // WebAssembly
+  DeviceType.webgpu: null, // WebGPU TODO: Not yet implemented in ort
+  DeviceType.cuda: CUDAExecutionProvider(), // CUDA
+  DeviceType.dml: DirectMLExecutionProvider(), // DirectML
 
-  DeviceType.webnn: OrtProvider.WEB_NN, // WebNN (default)
-  DeviceType.webnnNpu: OrtProvider.WEB_NN, // WebNN NPU TODO
-  DeviceType.webnnGpu: OrtProvider.WEB_NN, // WebNN GPU TODO
-  DeviceType.webnnCpu: OrtProvider.WEB_NN, // WebNN CPU TODO
+  DeviceType.webnn: null, // WebNN (default) TODO: Not yet implemented in ort
+  DeviceType.webnnNpu: null, // WebNN NPU TODO
+  DeviceType.webnnGpu: null, // WebNN GPU TODO
+  DeviceType.webnnCpu: null, // WebNN CPU TODO
 };
 
-const List<OrtProvider> defaultDevices = [OrtProvider.CPU];
+final List<ExecutionProvider> defaultDevices = [CPUExecutionProvider()];
 
 /// DO NOT ACCESS DIRECTLY. Use [getSupportedDevices] instead.
-List<OrtProvider>? _supportedDevices;
+List<ExecutionProvider>? _supportedDevices;
 
 /// Get the list of supported devices, sorted by priority/performance.
 /// TODO: Check if we need to handle sorted by priority/performance or if the flutter_onnxruntime does this already.
-Future<List<OrtProvider>> getSupportedDevices() async {
+List<ExecutionProvider> getSupportedDevices() {
   if (_supportedDevices != null) return _supportedDevices!;
 
-  _supportedDevices = await ort.getAvailableProviders();
+  _supportedDevices = getAvailableExecutionProviders();
   return _supportedDevices!;
-}
-
-extension OrtSessionOptionsEx on OrtSessionOptions {
-  OrtSessionOptions clone() => OrtSessionOptions(
-    intraOpNumThreads: intraOpNumThreads,
-    interOpNumThreads: interOpNumThreads,
-    providers: providers,
-    useArena: useArena,
-    deviceId: deviceId,
-  );
-
-  OrtSessionOptions cloneWith({
-    int? intraOpNumThreads,
-    int? interOpNumThreads,
-    List<OrtProvider>? providers,
-    bool? useArena,
-    int? deviceId,
-  }) => OrtSessionOptions(
-    intraOpNumThreads: intraOpNumThreads ?? this.intraOpNumThreads,
-    interOpNumThreads: interOpNumThreads ?? this.interOpNumThreads,
-    providers: providers ?? this.providers,
-    useArena: useArena ?? this.useArena,
-    deviceId: deviceId ?? this.deviceId,
-  );
-
-  static OrtSessionOptions fromJson(Map<String, dynamic> json) {
-    throw UnimplementedError('`fromJson` is not implemented for OrtSessionOptions');
-    return OrtSessionOptions(
-      // intraOpNumThreads: intraOpNumThreads,
-      // interOpNumThreads: interOpNumThreads,
-      // providers: providers,
-      // useArena: useArena,
-      // deviceId: deviceId,
-    );
-  }
-
-  Map<String, dynamic> toJson() => toMap();
-}
-
-extension OnnxRuntimeEx on OnnxRuntime {
-  /// TODO: This is more of a stop gap until we can actually store more config information
-  ///
-  /// We need to store some extra information about each Ort sessions so we will
-  /// store them here.
-  ///
-  /// Extensions cannot declare fields so we will store each config in here.
-  static final Map<OrtSession, Map<String, dynamic>> _configs = {};
-
-  /// Create an ONNX Runtime session with the given model path
-  Future<OrtSession> createSessionWithConfig(
-    String modelPath,
-    {OrtSessionOptions? options, Map<String, dynamic>? config}
-  ) async {
-    final session = await createSession(modelPath, options: options);
-    _configs[session] = config ?? {};
-    return session;
-  }
-
-  Future<void> dispose() async {
-    OnnxRuntimeEx._configs.clear();
-  }
-}
-
-extension OrtSessionEx on OrtSession {
-  Map<String, dynamic> get config => OnnxRuntimeEx._configs[this] ?? {};
-
-  Future<void> dispose() async {
-    OnnxRuntimeEx._configs.remove(this);
-    await close();
-  }
 }
 
 /// This is a wrapper class around the flutter_onnxruntime [OrtValue] to make
 /// things easier to work with.
-class Tensor<T> {
+class Tensor<T> with ListMixin<T> {
   /// The type of the data stored in the tensor
   final TensorDataType dataType;
 
@@ -124,12 +48,12 @@ class Tensor<T> {
   final List<int> shape;
 
   /// The underlying reference to the onnx tensor
-  OrtValue ortValue;
+  ort.Tensor ortTensor;
 
-  Tensor._(this.dataType, this.data, this.shape, this.ortValue);
+  Tensor._(this.dataType, this.data, this.shape, this.ortTensor);
 
   /// The shape/dimension of the tensor
-  List<int> get dims => ortValue.shape;
+  List<int> get dims => ortTensor.shape;
 
   /// Type of the tensor
   TensorDataType get type => dataType;
@@ -138,166 +62,88 @@ class Tensor<T> {
   int get size => data.length;
 
   /// The location of the tensor data
-  /// TODO: What does that mean?
-  String get location => '';
+  AllocationDevice get location => ortTensor.memoryInfo().allocationDevice();
 
   /// Create an onnx tensor with the given type
-  static Future<Tensor<T>> create<T>({
+  static Tensor<T> create<T>({
     required TensorDataType dataType,
     required List<T> data,
     List<int>? shape,
-  }) async {
+  }) {
     // Assume 1-D tensor if shape omitted
     shape ??= [1, data.length];
 
-    final OrtDataType ortDataType = _tensorDataTypeToOrtDataType(dataType);
-    final dynamic ortListData = _getOrtListData(dataType, data);
+    final ort.TensorElementType ortDataType = _tensorDataTypeToOrtDataType(dataType);
 
-    // First create the tensor
-    final ortValue = await OrtValue.fromList(ortListData, shape);
-    // Now convert the tensor to the correct type
-    await ortValue.to(ortDataType);
+    final ortValue = ort.Tensor.fromArray(
+      dtype: ortDataType,
+      data: data,
+      shape: shape,
+    );
 
     return Tensor._(dataType, data, shape, ortValue);
   }
 
-  static Future<Tensor<T>> createFromOrtValue<T>(OrtValue ortValue) async {
-    final TensorDataType dataType = switch (ortValue.dataType) {
-      OrtDataType.float32 => TensorDataType.float32,
-      OrtDataType.float16 => TensorDataType.float16,
-      OrtDataType.bfloat16 => TensorDataType.bfloat16,
+  static Tensor<T> createFromOrtTensor<T>(ort.Tensor ortTensor) {
+    final TensorDataType dataType = switch (ortTensor.dtype) {
+      TensorElementType.float32 => TensorDataType.float32,
+      TensorElementType.float16 => TensorDataType.float16,
+      TensorElementType.bfloat16 => TensorDataType.bfloat16,
 
-      OrtDataType.int64 => TensorDataType.int64,
-      OrtDataType.uint64 => TensorDataType.uint64,
-      OrtDataType.int32 => TensorDataType.int32,
-      OrtDataType.uint32 => TensorDataType.uint32,
-      OrtDataType.int16 => TensorDataType.int16,
-      OrtDataType.uint16 => TensorDataType.uint16,
-      OrtDataType.int8 => TensorDataType.int8,
-      OrtDataType.uint8 => TensorDataType.uint8,
+      TensorElementType.int64 => TensorDataType.int64,
+      TensorElementType.uint64 => TensorDataType.uint64,
+      TensorElementType.int32 => TensorDataType.int32,
+      TensorElementType.uint32 => TensorDataType.uint32,
+      TensorElementType.int16 => TensorDataType.int16,
+      TensorElementType.uint16 => TensorDataType.uint16,
+      TensorElementType.int8 => TensorDataType.int8,
+      TensorElementType.uint8 => TensorDataType.uint8,
 
-      OrtDataType.bool => TensorDataType.bool,
-      OrtDataType.string => TensorDataType.string,
+      TensorElementType.bool => TensorDataType.bool,
+      TensorElementType.string => TensorDataType.string,
 
-      OrtDataType.complex64 => throw UnimplementedError(
+      TensorElementType.complex64 => throw UnimplementedError(
           'OrtDataType.complex64 is not currently supported'),
-      OrtDataType.complex128 => throw UnimplementedError(
+      TensorElementType.complex128 => throw UnimplementedError(
           'OrtDataType.complex128 is not currently supported'),
-    };
-    final List<T> data = List<T>.from(await ortValue.asFlattenedList());
-    final List<int> shape = ortValue.shape;
 
-    return Tensor._(dataType, data, shape, ortValue);
+      TensorElementType.float64 => throw UnimplementedError(),
+      TensorElementType.float8E4M3Fn => throw UnimplementedError(),
+      TensorElementType.float8E4M3Fnuz => throw UnimplementedError(),
+      TensorElementType.float8E5M2 => throw UnimplementedError(),
+      TensorElementType.float8E5M2Fnuz => throw UnimplementedError(),
+      TensorElementType.uint4 => throw UnimplementedError(),
+      TensorElementType.int4 => throw UnimplementedError(),
+      TensorElementType.undefined => throw UnimplementedError(),
+    };
+    final List<int> shape = ortTensor.shape;
+    final List<T> data = ortTensor.data.cast<T>();
+
+    return Tensor._(dataType, data, shape, ortTensor);
   }
 
-  static OrtDataType _tensorDataTypeToOrtDataType(TensorDataType dataType) => switch (dataType) {
+  static TensorElementType _tensorDataTypeToOrtDataType(TensorDataType dataType) => switch (dataType) {
     TensorDataType.float64 => throw UnimplementedError(
         'float64 is not implemented for the flutter_onnxruntime package'),
 
-    TensorDataType.float32 => OrtDataType.float32,
-    TensorDataType.float16 => OrtDataType.float16,
-    TensorDataType.bfloat16 => OrtDataType.bfloat16,
+    TensorDataType.float32 => TensorElementType.float32,
+    TensorDataType.float16 => TensorElementType.float16,
+    TensorDataType.bfloat16 => TensorElementType.bfloat16,
 
-    TensorDataType.int64 => OrtDataType.int64,
-    TensorDataType.uint64 => OrtDataType.uint64,
-    TensorDataType.int32 => OrtDataType.int32,
-    TensorDataType.uint32 => OrtDataType.uint32,
-    TensorDataType.int16 => OrtDataType.int16,
-    TensorDataType.uint16 => OrtDataType.uint16,
-    TensorDataType.int8 => OrtDataType.int8,
-    TensorDataType.uint8 => OrtDataType.uint8,
-    TensorDataType.uint4 => OrtDataType.uint8,
-    TensorDataType.int4 => OrtDataType.int8,
+    TensorDataType.int64 => TensorElementType.int64,
+    TensorDataType.uint64 => TensorElementType.uint64,
+    TensorDataType.int32 => TensorElementType.int32,
+    TensorDataType.uint32 => TensorElementType.uint32,
+    TensorDataType.int16 => TensorElementType.int16,
+    TensorDataType.uint16 => TensorElementType.uint16,
+    TensorDataType.int8 => TensorElementType.int8,
+    TensorDataType.uint8 => TensorElementType.uint8,
+    TensorDataType.uint4 => TensorElementType.uint8,
+    TensorDataType.int4 => TensorElementType.int8,
 
-    TensorDataType.string => OrtDataType.string,
-    TensorDataType.bool => OrtDataType.bool,
+    TensorDataType.string => TensorElementType.string,
+    TensorDataType.bool => TensorElementType.bool,
   };
-
-  static dynamic _getOrtListData<T>(TensorDataType dataType, List<T> data) {
-    // TODO: Might be nice to coerce the type?
-    final dynamic ortListData;
-
-    switch (dataType) {
-      case TensorDataType.float64:
-        throw UnimplementedError(
-          'float64 is not implemented for the flutter_onnxruntime package',
-        );
-
-      case TensorDataType.float32:
-      case TensorDataType.float16:
-      case TensorDataType.bfloat16:
-        if (T != double && T != dynamic) {
-          throw ArgumentError(
-            'The data for a float32, float16, or bfloat16 tensor must be of '
-                'type List<double> not List<$T>',
-          );
-        }
-
-        ortListData = Float32List.fromList(List<double>.from(data));
-        break;
-
-      case TensorDataType.int64:
-      case TensorDataType.uint64:
-        if (T != int && T != dynamic) {
-          throw ArgumentError(
-            'The data for an int64 or uint64 tensor must be of type List<int> '
-                'not List<$T>',
-          );
-        }
-
-        ortListData = Int64List.fromList(List<int>.from(data));
-        break;
-      case TensorDataType.int32:
-      case TensorDataType.uint32:
-      case TensorDataType.int16:
-      case TensorDataType.uint16:
-      case TensorDataType.int8:
-        if (T != int && T != dynamic) {
-          throw ArgumentError(
-            'The data for an int32, uint32, int16, uint16, or int8 tensor must '
-                'be of type List<int> not List<$T>',
-          );
-        }
-
-        ortListData = Int32List.fromList(List<int>.from(data));
-        break;
-      case TensorDataType.uint8:
-      case TensorDataType.uint4:
-      case TensorDataType.int4:
-        if (T != int && T != dynamic) {
-          throw ArgumentError(
-            'The data for an uint8, uint4, or int4 tensor must be of type '
-                'List<int> not List<$T>',
-          );
-        }
-
-        ortListData = Uint8List.fromList(List<int>.from(data));
-        break;
-
-      case TensorDataType.string:
-        if (T != String && T != dynamic) {
-          throw ArgumentError(
-            'The data for a String tensor must be of type List<String> not '
-                'List<$T>',
-          );
-        }
-
-        ortListData = List<String>.from(data);
-        break;
-      case TensorDataType.bool:
-        if (T != bool && T != dynamic) {
-          throw ArgumentError(
-            'The data for a bool tensor must be of type List<bool> not '
-                'List<$T>',
-          );
-        }
-
-        ortListData = List<bool>.from(data);
-        break;
-    }
-
-    return ortListData;
-  }
 
   /// Casts the generic [T] of this class to a new type. Ideal for updating a
   /// [Tensor<dynamic>] to it's known type.
@@ -307,31 +153,81 @@ class Tensor<T> {
   ///
   /// Important: The returned [Tensor] points to the same underlying data and is
   /// not copied into a new Tensor.
-  Tensor<U> cast<U>() => Tensor._(dataType, data.cast<U>(), shape, ortValue);
-
-  Future<void> updateData(List<T> data) async {
-    await this.ortValue.dispose();
-
-    final dynamic ortListData = _getOrtListData(dataType, data);
-    final ortValue = await OrtValue.fromList(ortListData, shape);
-    await ortValue.to(_tensorDataTypeToOrtDataType(dataType));
-    this.data = data;
-    this.ortValue = ortValue;
-  }
+  @override
+  Tensor<U> cast<U>() => Tensor._(dataType, data.cast<U>(), shape, ortTensor);
 
   Future<void> dispose() async {
-    await ortValue.dispose();
+    ortTensor.dispose();
+  }
+
+  @override
+  set length(int newLength) {
+    throw StateError('Tensor is not growable');
+  }
+
+  @override
+  int get length => data.length;
+
+  @override
+  T operator [](int index) => data[index];
+
+  @override
+  void operator []=(int index, T value) {
+    data[index] = value;
+  }
+}
+
+/// Creates a view to another [Tensor] by subarray.
+class TensorSubarray<T> extends Tensor<T> {
+  final int begin;
+
+  final int end;
+
+  @override
+  List<T> get data => this;
+
+  final List<int> _dims;
+
+  @override
+  List<int> get dims => _dims;
+
+  TensorSubarray._(super.dataType, super.data, super.shape, super.ortTensor, this._dims, int? begin, int? end)
+      : begin = begin ?? 0,
+        end = end ?? data.length,
+        super._();
+
+  static TensorSubarray<T> subarray<T>(Tensor<T> tensor, List<int> iterDims, [int? begin, int? end]) {
+    return TensorSubarray<T>._(tensor.dataType, tensor.data, tensor.shape, tensor.ortTensor, iterDims, begin, end);
+  }
+
+  @override
+  Tensor<U> cast<U>() => TensorSubarray._(dataType, super.data.cast<U>(), shape, ortTensor, _dims, begin, end);
+
+  @override
+  set length(int newLength) {
+    throw StateError('Tensor is not growable');
+  }
+
+  @override
+  int get length => super.data.length - begin - (super.data.length - end);
+
+  @override
+  T operator [](int index) => super.data[index + begin];
+
+  @override
+  void operator []=(int index, T value) {
+    super.data[index + begin] = value;
   }
 }
 
 /// Map a device to the execution providers to use for the given device.
 /// @param {import("../utils/devices.js").DeviceType|"auto"|null} [device=null] (Optional) The device to run the inference on.
 /// @returns {ONNXExecutionProviders[]} The execution providers to use for the given device.
-Future<List<OrtProvider>> deviceToExecutionProviders([DeviceType? device]) async {
+List<ExecutionProvider> deviceToExecutionProviders([DeviceType? device]) {
   // Use the default execution providers if the user hasn't specified anything
   if (device == null) return defaultDevices;
 
-  final List<OrtProvider> supportedDevices = await getSupportedDevices();
+  final List<ExecutionProvider> supportedDevices = getSupportedDevices();
 
   // Handle overloaded cases
   switch (device) {
@@ -339,16 +235,17 @@ Future<List<OrtProvider>> deviceToExecutionProviders([DeviceType? device]) async
       return supportedDevices;
     case DeviceType.gpu:
       return supportedDevices.where((x) => [
-        OrtProvider.WEB_GPU,
-        OrtProvider.CUDA,
-        OrtProvider.DIRECT_ML,
-        OrtProvider.WEB_NN, // webnn-gpu TODO
+        // OrtProvider.WEB_GPU, // TODO: Not yet implemented in ort
+        CUDAExecutionProvider(),
+        ROCmExecutionProvider(),
+        DirectMLExecutionProvider(),
+        // OrtProvider.WEB_NN, // webnn-gpu TODO: Not yet implemented in ort
       ].contains(x)).toList();
     default:
       // Continue on :)
   }
 
-  final OrtProvider? ortDevice = DEVICE_TO_EXECUTION_PROVIDER_MAPPING[device];
+  final ExecutionProvider? ortDevice = DEVICE_TO_EXECUTION_PROVIDER_MAPPING[device];
   if (ortDevice != null && supportedDevices.contains(ortDevice)) {
     return [ortDevice];
   }
@@ -363,42 +260,36 @@ Future<List<OrtProvider>> deviceToExecutionProviders([DeviceType? device]) async
 /// @param {import('onnxruntime-common').InferenceSession.SessionOptions} session_options ONNX inference session options.
 /// @param {Object} session_config ONNX inference session configuration.
 /// @returns {Promise<import('onnxruntime-common').InferenceSession & { config: Object}>} The ONNX inference session.
-Future<OrtSession> createInferenceSession(
+Future<Session> createInferenceSession(
   dynamic buffer_or_path,
-  OrtSessionOptions session_options,
+  Map<String, dynamic> session_options,
   Map<String, dynamic> session_config,
 ) async {
   // TODO: session_config is not currently used. Should it be? How would it be used?
   if (buffer_or_path is String) {
-    return await ort.createSessionWithConfig(
-      buffer_or_path,
-      options: session_options,
-      config: session_config,
-    );
+    SessionBuilder builder = Session.builder();
+    final executionProviders = session_options['executionProviders'];
+    if (executionProviders != null) {
+      builder = builder.withExecutionProviders(executionProviders);
+    }
+    return await builder.commitFromFile(buffer_or_path);
   }
 
   return await createInferenceSessionBytes(buffer_or_path, session_options);
 }
 
 /// Create sn ONNX Runtime session with the given bytes as the model
-Future<OrtSession> createInferenceSessionBytes(
+Future<Session> createInferenceSessionBytes(
   List<int> buffer,
-  OrtSessionOptions sessionOptions,
+  Map<String, dynamic> sessionOptions,
   [Map<String, dynamic>? session_config]
 ) async {
-  // The flutter_onnxruntime package doesn't have a way to load a model from
-  // memory so we will first save it to a path and load it from there
-  final Directory tempDir = await getTemporaryDirectory();
-
-  // Create filename as a hash from the bytes so it can be reused if it exists
-  final String filename = sha256.convert(buffer).toString();
-  final File modelFile = File(path.join(tempDir.path, filename));
-
-  if (!await modelFile.exists()) {
-    await modelFile.writeAsBytes(buffer);
+  SessionBuilder builder = Session.builder();
+  final executionProviders = sessionOptions['executionProviders'];
+  if (executionProviders != null) {
+    builder = builder.withExecutionProviders(executionProviders);
   }
-
-  return await ort.createSessionWithConfig(modelFile.path, options: sessionOptions, config: session_config);
+  return await builder.commitFromMemory(buffer);
 }
 
 /// TODO: This is not implemented and will always be false

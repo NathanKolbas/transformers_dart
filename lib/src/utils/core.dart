@@ -136,7 +136,7 @@ int calculateReflectOffset(int i, int w) => ((i + w) % (2 * w) - w).abs();
 /// @param  {Array[]} arrs Arrays to merge.
 /// @returns {Array} The merged array.
 List<T> mergeArrays<T>(List<List<T>> arrs) {
-  return List<T>.from(arrs.flat());
+  return arrs.flat().cast<T>();
 }
 
 ///

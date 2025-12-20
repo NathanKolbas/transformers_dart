@@ -4,12 +4,16 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:transformers/src/models.dart';
 import 'package:transformers/src/models/auto/processing_auto.dart';
-import 'package:transformers/src/utils/hub.dart';
 import 'package:transformers/transformers.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Transformers.ensureInitialized(throwOnFail: true);
+  await Transformers.ensureInitialized(
+    throwOnFail: true,
+    ortOptions: OrtInitializationOptions(
+      showDebugMessages: true,
+    ),
+  );
 
   const model_id = "onnx-community/granite-docling-258M-ONNX";
   Stopwatch stopwatch = Stopwatch()..start();
@@ -89,5 +93,5 @@ Future<void> main() async {
   Timeline.finishSync();
   stopwatch.stop();
   print('Generated text in ${stopwatch.elapsed}');
-  print(generated_texts[0]);
+  // print(generated_texts[0]);
 }

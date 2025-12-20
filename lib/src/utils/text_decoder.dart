@@ -43,5 +43,5 @@ class TextDecoder {
   }
 
   /// Decodes the given bytes into a JavaScript string and returns it.
-  String decode(Uint8List buffer) => utf8.decode(buffer);
+  String decode(Uint8List buffer) => utf8.decode(buffer, allowMalformed: !fatal);
 }

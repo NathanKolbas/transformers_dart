@@ -109,7 +109,7 @@ class GreedySampler extends LogitsSampler {
   @override
   Future<List<(int, double)>> sample(Tensor logits) async {
     // NOTE: no need to do log_softmax here since we only take the maximum
-    final argmax = max(List<num>.from(logits.data)).$2;
+    final argmax = max(logits.data.cast<num>()).$2;
 
     // Note: score is meaningless in this context, since we are performing
     // greedy search (p = 1 => log(p) = 0)
@@ -137,7 +137,7 @@ class MultinomialSampler extends LogitsSampler {
     final (v, i) = await topk(logits, k);
 
     // Compute softmax over logits
-    final probabilities = softmax(List<num>.from(v.data));
+    final probabilities = softmax(v.data.cast<num>());
 
     return List.generate(generation_config.num_beams, (_) {
       final sampledIndex = randomSelect(probabilities);

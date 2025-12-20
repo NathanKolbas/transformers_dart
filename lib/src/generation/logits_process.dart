@@ -11,7 +11,7 @@ abstract class LogitsBase {
   /// @param {bigint[][]} input_ids The input ids.
   /// @param {Tensor} logits The logits to process.
   /// @throws {Error} Throws an error if `_call` is not implemented in the subclass.
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     throw UnimplementedError("`_call` should be implemented in a subclass");
   }
 }
@@ -46,7 +46,7 @@ class LogitsProcessorList with IterableMixin<LogitsBase> {
   ///
   /// @param {bigint[][]} input_ids The input IDs for the language model.
   /// @param {Tensor} logits
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     Tensor toReturn = logits;
     // NOTE: Most processors modify logits inplace
     for (final processor in processors) {
@@ -71,29 +71,15 @@ class ForcedBOSTokenLogitsProcessor extends LogitsProcessor {
   /// @param {bigint[][]} input_ids The input IDs.
   /// @param {Tensor} logits The logits.
   /// @returns {Tensor} The logits with BOS token forcing.
-  /// TODO: Validate that the changes work correctly due to no updating list in-place
   @override
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
-    final List<Future<void>> disposers = [];
-    final List<dynamic> updatedData = [];
-
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
-      final batch_logits = await logits[i];
-      final batch_logits_data = batch_logits.data;
-
       if (input_ids[i].length == 1) {
+        final batch_logits_data = (await logits[i]).data;
         batch_logits_data.fillRange(0, batch_logits_data.length, -double.infinity);
-        batch_logits_data[bos_token_id] = 0;
+        batch_logits_data[bos_token_id] = 0.0;
       }
-
-      updatedData.addAll(batch_logits_data);
-      disposers.add(batch_logits.dispose());
     }
-
-    await Future.wait([
-      ...disposers,
-      logits.updateData(updatedData),
-    ]);
     return logits;
   }
 }
@@ -115,31 +101,17 @@ class ForcedEOSTokenLogitsProcessor extends LogitsProcessor {
   ///
   /// @param {bigint[][]} input_ids The input ids.
   /// @param {Tensor} logits The logits tensor.
-  /// TODO: Validate that the changes work correctly due to no updating list in-place
   @override
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
-    final List<Future<void>> disposers = [];
-    final List<dynamic> updatedData = [];
-
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
-      final batch_logits = await logits[i];
-      final batch_logits_data = batch_logits.data;
-
       if (input_ids[i].length == max_length - 1) {
+        final batch_logits_data = (await logits[i]).data;
         batch_logits_data.fillRange(0, batch_logits_data.length, -double.infinity);
         for (final eos_token in eos_token_id) {
-          batch_logits_data[eos_token] = 0;
+          batch_logits_data[eos_token] = 0.0;
         }
       }
-
-      updatedData.addAll(batch_logits_data);
-      disposers.add(batch_logits.dispose());
     }
-
-    await Future.wait([
-      ...disposers,
-      logits.updateData(updatedData),
-    ]);
     return logits;
   }
 }
@@ -160,30 +132,16 @@ class SuppressTokensAtBeginLogitsProcessor extends LogitsProcessor {
   /// @param {bigint[][]} input_ids The input IDs.
   /// @param {Tensor} logits The logits.
   /// @returns {Tensor} The logits with BOS token forcing.
-  /// TODO: Validate that the changes work correctly due to no updating list in-place
   @override
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
-    final List<Future<void>> disposers = [];
-    final List<dynamic> updatedData = [];
-
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
-      final batch_logits = await logits[i];
-      final batch_logits_data = batch_logits.data;
-
       if (input_ids[i].length == begin_index) {
+        final batch_logits_data = (await logits[i]).data;
         for (final token_id in begin_suppress_tokens) {
           batch_logits_data[token_id] = -double.infinity;
         }
       }
-
-      updatedData.addAll(batch_logits_data);
-      disposers.add(batch_logits.dispose());
     }
-
-    await Future.wait([
-      ...disposers,
-      logits.updateData(updatedData),
-    ]);
     return logits;
   }
 }
@@ -252,29 +210,15 @@ class NoRepeatNGramLogitsProcessor extends LogitsProcessor {
   /// @param {bigint[][]} input_ids The input IDs.
   /// @param {Tensor} logits The logits.
   /// @returns {Tensor} The logits with no-repeat-ngram processing.
-  /// TODO: Validate that the changes work correctly due to no updating list in-place
   @override
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
-    final List<Future<void>> disposers = [];
-    final List<dynamic> updatedData = [];
-
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
-      final batch_logits = await logits[i];
-      final batch_logits_data = batch_logits.data;
+      final batch_logits_data = (await logits[i]).data;
       final bannedTokens = calcBannedNgramTokens(input_ids[i]);
-
       for (final token in bannedTokens) {
         batch_logits_data[token] = -double.infinity;
       }
-
-      updatedData.addAll(batch_logits_data);
-      disposers.add(batch_logits.dispose());
     }
-
-    await Future.wait([
-      ...disposers,
-      logits.updateData(updatedData),
-    ]);
     return logits;
   }
 }
@@ -301,16 +245,10 @@ class RepetitionPenaltyLogitsProcessor extends LogitsProcessor {
   /// @param {bigint[][]} input_ids The input IDs.
   /// @param {Tensor} logits The logits.
   /// @returns {Tensor} The logits with repetition penalty processing.
-  /// TODO: Validate that the changes work correctly due to no updating list in-place
   @override
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
-    final List<Future<void>> disposers = [];
-    final List<dynamic> updatedData = [];
-
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
-      final batch_logits = await logits[i];
-      final batch_logits_data = batch_logits.data;
-
+      final batch_logits_data = (await logits[i]).data;
       for (final input_id in input_ids[i].toSet()) {
         final token = input_id;
         if (batch_logits_data[token] < 0) {
@@ -319,15 +257,8 @@ class RepetitionPenaltyLogitsProcessor extends LogitsProcessor {
           batch_logits_data[token] /= penalty;
         }
       }
-
-      updatedData.addAll(batch_logits_data);
-      disposers.add(batch_logits.dispose());
     }
 
-    await Future.wait([
-      ...disposers,
-      logits.updateData(updatedData),
-    ]);
     return logits;
   }
 }
@@ -349,30 +280,18 @@ class MinLengthLogitsProcessor extends LogitsProcessor {
   /// @param {bigint[][]} input_ids The input IDs.
   /// @param {Tensor} logits The logits.
   /// @returns {Tensor} The processed logits.
-  /// TODO: Validate that the changes work correctly due to no updating list in-place
   @override
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
-    final List<Future<void>> disposers = [];
-    final List<dynamic> updatedData = [];
-
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
-      final batch_logits = await logits[i];
-      final batch_logits_data = batch_logits.data;
-
       if (input_ids[i].length < min_length) {
+        final batch_logits_data = (await logits[i]).data;
+
         for (final eos_token in eos_token_id) {
           batch_logits_data[eos_token] = -double.infinity;
         }
       }
-
-      updatedData.addAll(batch_logits_data);
-      disposers.add(batch_logits.dispose());
     }
 
-    await Future.wait([
-      ...disposers,
-      logits.updateData(updatedData),
-    ]);
     return logits;
   }
 }
@@ -396,31 +315,18 @@ class MinNewTokensLengthLogitsProcessor extends LogitsProcessor {
   /// Apply logit processor.
   /// @param {bigint[][]} input_ids The input IDs.
   /// @param {Tensor} logits The logits.
-  /// TODO: Validate that the changes work correctly due to no updating list in-place
   @override
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
-    final List<Future<void>> disposers = [];
-    final List<dynamic> updatedData = [];
-
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
-      final batch_logits = await logits[i];
-      final batch_logits_data = batch_logits.data;
       final new_tokens_length = input_ids[i].length - prompt_length_to_skip;
-
       if (new_tokens_length < min_new_tokens) {
+        final batch_logits_data = (await logits[i]).data;
+
         for (final eos_token in eos_token_id) {
           batch_logits_data[eos_token] = -double.infinity;
         }
       }
-
-      updatedData.addAll(batch_logits_data);
-      disposers.add(batch_logits.dispose());
     }
-
-    await Future.wait([
-      ...disposers,
-      logits.updateData(updatedData),
-    ]);
     return logits;
   }
 }
@@ -441,17 +347,11 @@ class NoBadWordsLogitsProcessor extends LogitsProcessor {
   /// @param {bigint[][]} input_ids The input IDs.
   /// @param {Tensor} logits The logits.
   /// @returns {Tensor} The processed logits.
-  /// TODO: Validate that the changes work correctly due to no updating list in-place
   @override
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
-    final List<Future<void>> disposers = [];
-    final List<dynamic> updatedData = [];
-
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
-      final batch_logits = await logits[i];
-      final batch_logits_data = batch_logits.data;
+      final batch_logits_data = (await logits[i]).data;
       final ids = input_ids[i];
-
       for (final bad_word_ids in bad_words_ids) {
         // There aren't enough tokens to match the banned sequence
         if (ids.length < bad_word_ids.length - 1) continue;
@@ -462,7 +362,8 @@ class NoBadWordsLogitsProcessor extends LogitsProcessor {
         // For each bad word in the list, if the current sequence of input ids ends with this sequence (excluding the last),
         // then we set the logits of the last bad word id to -Infinity.
         for (int j = 1; j <= bad_word_ids.length - 1; ++j) {
-          if (bad_word_ids[-j - 1] != ids[-j]) {
+          // TODO: Check that this conversion is correct
+          if (bad_word_ids[bad_word_ids.length - j - 1] != ids[ids.length - j]) {
             // We have found a mismatch
             mark = false;
             break;
@@ -472,15 +373,7 @@ class NoBadWordsLogitsProcessor extends LogitsProcessor {
           batch_logits_data[bad_word_ids.last] = -double.infinity;
         }
       }
-
-      updatedData.addAll(batch_logits_data);
-      disposers.add(batch_logits.dispose());
     }
-
-    await Future.wait([
-      ...disposers,
-      logits.updateData(updatedData),
-    ]);
     return logits;
   }
 }
@@ -510,9 +403,8 @@ class ClassifierFreeGuidanceLogitsProcessor extends LogitsProcessor {
   /// @param {bigint[][]} input_ids The input IDs.
   /// @param {Tensor} logits The logits.
   /// @returns {Tensor} The processed logits.
-  /// TODO: Validate that the changes work correctly due to no updating list in-place
   @override
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     if (logits.dims[0] != 2 * input_ids.length) {
       throw Exception(
         'Logits should have twice the batch size of the input ids, the first half of batches corresponding to '
@@ -531,10 +423,6 @@ class ClassifierFreeGuidanceLogitsProcessor extends LogitsProcessor {
       uncond_logits.data[i] += (cond_logits.data[i] - uncond_logits.data[i]) * guidance_scale;
     }
 
-    await Future.wait([
-      cond_logits.dispose(),
-      uncond_logits.updateData(uncond_logits.data),
-    ]);
     return uncond_logits;
   }
 }
@@ -566,12 +454,12 @@ class TemperatureLogitsWarper extends LogitsWarper {
   /// @param {Tensor} logits The logits.
   /// @returns {Tensor} The processed logits.
   @override
-  Future<Tensor> call(List<dynamic> input_ids, Tensor logits) async {
+  Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     final batch_logits_data = logits.data;
-    for (int i=0; i < batch_logits_data.length; ++i) {
+    for (int i = 0; i < batch_logits_data.length; ++i) {
       batch_logits_data[i] /= temperature;
     }
-    return await logits.updateData(batch_logits_data);
+    return logits;
   }
 }
 

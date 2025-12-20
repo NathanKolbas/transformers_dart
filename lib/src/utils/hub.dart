@@ -5,8 +5,6 @@ import 'dart:io';
 
 import 'package:dio/dio.dart' hide ProgressCallback;
 import 'package:flutter/foundation.dart';
-import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
-import 'package:transformers/src/backends/onnx.dart';
 import 'package:transformers/src/configs.dart';
 import 'package:transformers/src/env.dart';
 import 'package:transformers/src/utils/core.dart';
@@ -105,7 +103,7 @@ class ModelSpecificPretrainedOptions {
 
   /// User-specified session options passed to the runtime. If not provided,
   /// suitable defaults will be chosen.
-  OrtSessionOptions? session_options;
+  Map<String, dynamic>? session_options;
 
   ModelSpecificPretrainedOptions({
     this.subfolder = 'onnx',
@@ -151,7 +149,7 @@ class PretrainedModelOptions implements PretrainedOptions, ModelSpecificPretrain
   String? model_file_name;
 
   @override
-  OrtSessionOptions? session_options;
+  Map<String, dynamic>? session_options;
 
   @override
   String subfolder;
@@ -208,7 +206,7 @@ class PretrainedModelOptions implements PretrainedOptions, ModelSpecificPretrain
     device: json['device'],
     dtype: json['dtype'],
     model_file_name: json['model_file_name'],
-    session_options: json['session_options'] == null ? null : OrtSessionOptionsEx.fromJson(json['session_options']),
+    session_options: json['session_options'],
     subfolder: json['subfolder'] ?? 'onnx',
     use_external_data_format: json['use_external_data_format'],
   );
@@ -223,7 +221,7 @@ class PretrainedModelOptions implements PretrainedOptions, ModelSpecificPretrain
     'device': device,
     'dtype': dtype,
     'model_file_name': model_file_name,
-    'session_options': session_options?.toJson(),
+    'session_options': session_options,
     'subfolder': subfolder,
     'use_external_data_format': use_external_data_format,
   };

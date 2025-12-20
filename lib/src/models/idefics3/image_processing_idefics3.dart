@@ -44,7 +44,7 @@ class Idefics3ImageProcessor extends ImageProcessor {
     if (images is RawImage) {
       batched_2d_images = [[images]];
     } else {
-      images = images as List<dynamic>;
+      images = images as List;
       if (images.isEmpty || images.firstOrNull == null) {
         throw ArgumentError('No images provided.');
       }
@@ -76,8 +76,7 @@ class Idefics3ImageProcessor extends ImageProcessor {
 
       // Convert images to 4D tensors for easier processing
       await Future.wait(images_list.map((x) async {
-        x.pixel_values = await x.pixel_values.unsqueeze(0);
-        return x;
+        await x.pixel_values.unsqueeze_(0);
       }));
 
       final int longest_edge = this.max_image_size['longest_edge'];
@@ -129,8 +128,7 @@ class Idefics3ImageProcessor extends ImageProcessor {
     Tensor<double> pixel_values;
     Tensor<bool> pixel_attention_mask;
     if (batch_size == 1) {
-      all_pixel_values[0] = await all_pixel_values[0].unsqueeze(0);
-      pixel_values = all_pixel_values[0];
+      pixel_values = await all_pixel_values[0].unsqueeze_(0);
       pixel_attention_mask = await full([batch_size, n, h, w], true);
     } else {
       // Add padding (if necessary) to images with less patches than the maximum number of patches

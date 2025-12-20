@@ -208,12 +208,47 @@ Map<String, dynamic> getNormalizedConfig(Map<String, dynamic> config) {
   return normalized_config;
 }
 
+///
 /// @param {PretrainedConfig} config
 /// @returns {Record<string, number[]>}
-Map<String, List<int>> getKeyValueShapes(PretrainedConfig? config, {
-  String prefix = 'past_key_values',
-  int batch_size = 1,
-}) {
+Map<String, List<int>> getCacheShapes(PretrainedConfig config, [Map<String, dynamic>? options]) {
+  if (config.model_type == 'lfm2') {
+    final pkv_prefix = options?['prefix'] ?? 'past_key_values';
+    final conv_prefix = pkv_prefix == 'present' ? 'present' : 'past';
+
+    // Custom caching mechanism for LFM2
+    final Map<String, List<int>> cache_values = {};
+
+    final layer_types = config['layer_types'];
+    final num_attention_heads = config['num_attention_heads'];
+    final num_key_value_heads = config['num_key_value_heads'];
+    final hidden_size = config['hidden_size'];
+    final conv_L_cache = config['conv_L_cache'];
+
+    final head_dim = hidden_size / num_attention_heads;
+    final batch_size = options?['batch_size'] ?? 1;
+    for (int i = 0; i < layer_types.length; ++i) {
+      if (layer_types[i] == 'full_attention') {
+        for (final kv in ['key', 'value']) {
+          cache_values['$pkv_prefix.$i.$kv'] = [batch_size, num_key_value_heads, 0, head_dim];
+        }
+      } else if (layer_types[i] == 'conv') {
+        cache_values['${conv_prefix}_conv.$i'] = [batch_size, hidden_size, conv_L_cache];
+      } else {
+        throw StateError('Unsupported layer type: ${layer_types[i]}');
+      }
+    }
+    return cache_values;
+  }
+  return getKeyValueShapes(config, options);
+}
+
+/// @param {PretrainedConfig} config
+/// @returns {Record<string, number[]>}
+Map<String, List<int>> getKeyValueShapes(PretrainedConfig? config, [Map<String, dynamic>? options]) {
+  final prefix = options?['prefix'] ?? 'past_key_values';
+  final batch_size = options?['batch_size'] ?? 1;
+
   /** @type {Record<string, number[]>} */
   final Map<String, List<int>> decoderFeeds = {};
   final Map<String, dynamic> normalized_config = config?.normalized_config ?? {};

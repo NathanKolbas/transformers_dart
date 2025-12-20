@@ -7,7 +7,7 @@
 
 import 'dart:math' as math;
 
-import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
+import 'package:ort/ort.dart' as ort;
 import 'package:transformers/src/backends/onnx.dart' as onnx;
 import 'package:transformers/src/ops/registry.dart';
 import 'package:transformers/src/utils/maths.dart';
@@ -56,7 +56,7 @@ class Tensor<T> {
   int get size => ort_tensor.size;
 
   /// @type {string} The location of the tensor data.
-  String get location => ort_tensor.location;
+  ort.AllocationDevice get location => ort_tensor.location;
 
   onnx.Tensor<T> ort_tensor;
 
@@ -64,12 +64,12 @@ class Tensor<T> {
   /// @param {[DataType, DataArray, number[]]|[ONNXTensor]} args
   Tensor._(this.ort_tensor);
 
-  static Future<Tensor<T>> create<T>(
+  static Tensor<T> create<T>(
     TensorDataType tensorDataType,
     List<T> data,
     [List<int>? shape]
-  ) async {
-    final ort_tensor = await onnx.Tensor.create<T>(
+  ) {
+    final ort_tensor = onnx.Tensor.create<T>(
       dataType: tensorDataType,
       data: data,
       shape: shape,
@@ -78,17 +78,10 @@ class Tensor<T> {
     return Tensor<T>._(ort_tensor);
   }
 
-  static Future<Tensor<T>> createFromOrtValue<T>(OrtValue ortValue) async {
-    final ort_tensor = await onnx.Tensor.createFromOrtValue<T>(ortValue);
+  static Tensor<T> createFromOrtTensor<T>(ort.Tensor ortTensor) {
+    final ort_tensor = onnx.Tensor.createFromOrtTensor<T>(ortTensor);
 
     return Tensor<T>._(ort_tensor);
-  }
-
-  /// Used to update the data in-place. Directly modifying the [data] list will
-  /// have no effect since it is transferred outside of dart.
-  Future<Tensor<T>> updateData(List<T> data) async {
-    await ort_tensor.updateData(data);
-    return this;
   }
 
   Future<void> dispose() async {
@@ -103,7 +96,7 @@ class Tensor<T> {
   /// Index into a Tensor object.
   /// @param {number} index The index to access.
   /// @returns {Tensor} The data at the specified index.
-  Future<Tensor<T>> _getitem(int index) async {
+  Tensor<T> _getitem(int index) {
     final [iterLength, ...iterDims] = dims;
 
     index = safeIndex(index, iterLength);
@@ -112,7 +105,7 @@ class Tensor<T> {
       final iterSize = iterDims.reduce((a, b) => a * b);
       return _subarray(index, iterSize, iterDims);
     } else {
-      return await Tensor.create(type, [data[index]], iterDims);
+      return Tensor.create(type, [data[index]], iterDims);
     }
   }
 
@@ -183,13 +176,11 @@ class Tensor<T> {
   /// @param {number} iterSize
   /// @param {any} iterDims
   /// @returns {Tensor}
-  Future<Tensor<T>> _subarray(int index, int iterSize, List<int> iterDims) async {
+  Tensor<T> _subarray(int index, int iterSize, List<int> iterDims) {
     final o1 = index * iterSize;
     final o2 = (index + 1) * iterSize;
 
-    // We use subarray if available (typed array), otherwise we use slice (normal array)
-    final data = this.data.sublist(o1, o2);
-    return await Tensor.create(type, data, iterDims);
+    return TensorSubarray.subarray(this, iterDims, o1, o2);
   }
 
   /// Returns the value of this tensor as a standard JavaScript Number. This only works
@@ -212,109 +203,121 @@ class Tensor<T> {
 
   /// Return a new Tensor with the sigmoid function applied to each element.
   /// @returns {Tensor} The tensor with the sigmoid function applied.
-  Future<Tensor<double>> sigmoid() async {
-    final List<T> this_data = data;
+  Tensor<double> sigmoid() {
+    return clone().sigmoid_();
+  }
+
+  /// Applies the sigmoid function to the tensor in place.
+  /// @returns {Tensor} Returns `this`.
+  Tensor<double> sigmoid_() {
     if (T != num) throw StateError('This tensor is not a num');
+    if (T != double) throw StateError('TODO: This tensor is not a double');
 
-    final List<double> newData = List.generate(
-      this_data.length,
-          (i) => T is double
-          ? this_data[i] as double
-          : (this_data[i] as num).toDouble(),
-    );
-
-    for (int i=0; i < newData.length; ++i) {
-      newData[i] = 1 / (1 + math.exp(-newData[i]));
+    for (int i = 0; i < ort_tensor.length; ++i) {
+      ort_tensor[i] = (1 / (1 + math.exp(-(ort_tensor[i] as num)))) as T;
     }
-
-    await dispose();
-
-    return await create<double>(type, newData, dims);
+    return this as Tensor<double>;
   }
 
   /// Return a new Tensor with a callback function applied to each element.
   /// @param {Function} callback - The function to apply to each element. It should take three arguments:
   ///                              the current element, its index, and the tensor's data array.
   /// @returns {Tensor} A new Tensor with the callback function applied to each element.
-  Future<Tensor<U>> map<U>(U Function(T element, int index, List<T> data) callback) async {
-    final List<U> newData = data
-        .indexed
-        .map((e) => callback(e.$2, e.$1, data))
-        .toList();
+  Tensor<U> map<U>(U Function(T element, int index, List<T> data) callback) {
+    return clone().map_(callback);
+  }
 
-    await dispose();
-
-    return await create<U>(type, newData, dims);
+  /// Apply a callback function to each element of the tensor in place.
+  /// @param {Function} callback - The function to apply to each element. It should take three arguments:
+  ///                              the current element, its index, and the tensor's data array.
+  /// @returns {Tensor} Returns `this`.
+  Tensor<U> map_<U>(U Function(T element, int index, List<T> data) callback) {
+    for (int i = 0; i < ort_tensor.length; ++i) {
+      ort_tensor[i] = callback(ort_tensor[i], i, ort_tensor) as T;
+    }
+    return this as Tensor<U>;
   }
 
   /// Return a new Tensor with every element multiplied by a constant.
   /// @param {number} val The value to multiply by.
   /// @returns {Tensor} The new tensor.
-  Future<Tensor<T>> mul(num val) async {
+  Tensor<T> mul(num val) {
+    return clone().mul_(val);
+  }
+
+  /// Multiply the tensor by a constant in place.
+  /// @param {number} val The value to multiply by.
+  /// @returns {Tensor} Returns `this`.
+  Tensor<T> mul_(num val) {
     if (T != num) throw StateError('This tensor is not a num');
 
-    final List<T> newData = data
-        .map((e) => (e as num) * val)
-        .cast<T>()
-        .toList();
-
-    await dispose();
-
-    return await create<T>(type, newData, dims);
+    for (int i = 0; i < ort_tensor.length; ++i) {
+      ort_tensor[i] = ((ort_tensor[i] as num) * val) as T;
+    }
+    return this;
   }
 
   /// Return a new Tensor with every element divided by a constant.
   /// @param {number} val The value to divide by.
   /// @returns {Tensor} The new tensor.
-  Future<Tensor<T>> div(num val) async {
+  Tensor<T> div(num val) {
+    return clone().div_(val);
+  }
+
+  /// Divide the tensor by a constant in place.
+  /// @param {number} val The value to divide by.
+  /// @returns {Tensor} Returns `this`.
+  Tensor<T> div_(num val) {
     if (T != num) throw StateError('This tensor is not a num');
 
-    final List<T> newData = data
-        .map((e) => (e as num) / val)
-        .cast<T>()
-        .toList();
-
-    await dispose();
-
-    return await create<T>(type, newData, dims);
+    for (int i = 0; i < ort_tensor.length; ++i) {
+      ort_tensor[i] = ((ort_tensor[i] as num) / val) as T;
+    }
+    return this;
   }
 
   /// Return a new Tensor with every element added by a constant.
   /// @param {number} val The value to add by.
   /// @returns {Tensor} The new tensor.
-  Future<Tensor<T>> add(num val) async {
+  Tensor<T> add(num val) {
+    return clone().add_(val);
+  }
+
+  /// Add the tensor by a constant in place.
+  /// @param {number} val The value to add by.
+  /// @returns {Tensor} Returns `this`.
+  Tensor<T> add_(num val) {
     if (T != num) throw StateError('This tensor is not a num');
 
-    final List<T> newData = data
-        .map((e) => (e as num) + val)
-        .cast<T>()
-        .toList();
-
-    await dispose();
-
-    return await create<T>(type, newData, dims);
+    for (int i = 0; i < ort_tensor.length; ++i) {
+      ort_tensor[i] = ((ort_tensor[i] as num) + val) as T;
+    }
+    return this;
   }
 
   /// Return a new Tensor with every element subtracted by a constant.
   /// @param {number} val The value to subtract by.
   /// @returns {Tensor} The new tensor.
-  Future<Tensor<T>> sub(num val) async {
+  Tensor<T> sub(num val) {
+    return clone().sub_(val);
+  }
+
+  /// Subtract the tensor by a constant in place.
+  /// @param {number} val The value to subtract by.
+  /// @returns {Tensor} Returns `this`.
+  Tensor<T> sub_(num val) {
     if (T != num) throw StateError('This tensor is not a num');
 
-    final List<T> newData = data
-        .map((e) => (e as num) - val)
-        .cast<T>()
-        .toList();
-
-    await dispose();
-
-    return await create<T>(type, newData, dims);
+    for (int i = 0; i < ort_tensor.length; ++i) {
+      ort_tensor[i] = ((ort_tensor[i] as num) - val) as T;
+    }
+    return this;
   }
 
   /// Creates a deep copy of the current Tensor.
   /// @returns {Tensor} A new Tensor with the same type, data, and dimensions as the original.
-  Future<Tensor<T>> clone() async {
-    return await create<T>(type, data.toList(), dims);
+  Tensor<T> clone() {
+    return create<T>(type, data.toList(), dims);
   }
 
   /// Performs a slice operation on the Tensor along specified dimensions.
@@ -344,7 +347,7 @@ class Tensor<T> {
   /// - If null is given, then the entire dimension is selected.
   /// @returns {Tensor} A new Tensor containing the selected elements.
   /// @throws {Error} If the slice input is invalid.
-  Future<Tensor<T>> slice([List<dynamic>? slices]) async {
+  Tensor<T> slice([List<dynamic>? slices]) {
     // This allows for slicing with ranges and numbers
     final List<int> newTensorDims = [];
     final List<(int, int)> newOffsets = [];
@@ -410,20 +413,28 @@ class Tensor<T> {
       }
       data[i] = this_data[originalIndex];
     }
-    return await Tensor.create(type, data, newTensorDims);
+    return Tensor.create(type, data, newTensorDims);
   }
 
   /// Return a permuted version of this Tensor, according to the provided dimensions.
   /// @param  {...number} dims Dimensions to permute.
   /// @returns {Tensor} The permuted tensor.
-  Future<Tensor<T>> permute(List<int> dims) async {
+  Tensor<T> permute(List<int> dims) {
     final (permutedData, shape) = permute_data(data, this.dims, dims);
-    await dispose();
-    return await create<T>(type, permutedData, shape);
+    return create<T>(type, permutedData, shape);
   }
 
   // TODO: implement transpose. For now (backwards compatibility), it's just an alias for permute()
-  Future<Tensor<T>> transpose(List<int> dims) => permute(dims);
+  Tensor<T> transpose(List<int> dims) => permute(dims);
+
+  /// Returns the sum of each row of the input tensor in the given dimension dim.
+  ///
+  /// @param {number} [dim=null] The dimension or dimensions to reduce. If `null`, all dimensions are reduced.
+  /// @param {boolean} keepdim Whether the output tensor has `dim` retained or not.
+  /// @returns The summed tensor
+  Tensor sum([int? dim, bool keepdim = false]) {
+    return norm(1, dim, keepdim);
+  }
 
   /// Returns the matrix norm or vector norm of a given tensor.
   /// @param {number|string} [p='fro'] The order of norm
@@ -431,7 +442,7 @@ class Tensor<T> {
   /// If dim is None, the norm will be calculated across all dimensions of input.
   /// @param {boolean} [keepdim=false] Whether the output tensors have dim retained or not.
   /// @returns {Tensor} The norm of the tensor.
-  Future<Tensor> norm([dynamic p = 'fro', int? dim = null, bool keepdim = false]) async {
+  Tensor norm([dynamic p = 'fro', int? dim, bool keepdim = false]) {
     if (p == 'fro') {
       // NOTE: Since we only support integer dims, Frobenius norm produces the same result as p=2.
       p = 2;
@@ -444,7 +455,7 @@ class Tensor<T> {
 
     if (dim == null) {
       final val = math.pow(this_data.fold(0, fn), 1 / p);
-      return await create<T>(this.type, [val as T], []);
+      return create<T>(this.type, [val as T], []);
     }
 
     final (type, result, resultDims) = reduce_helper<T, num>(fn, this, dim, keepdim);
@@ -454,19 +465,27 @@ class Tensor<T> {
         result[i] = math.pow(result[i], 1 / p);
       }
     }
-    return await create(type, result, resultDims);
+    return create(type, result, resultDims);
   }
 
   /// Performs `L_p` normalization of inputs over specified dimension.
   /// @param {number} [p=2] The exponent value in the norm formulation
   /// @param {number} [dim=1] The dimension to reduce
   /// @returns {Tensor} The normalized tensor.
-  Future<Tensor> normalize([double p = 2.0, int dim = 1]) async {
+  Tensor normalize([double p = 2.0, int dim = 1]) {
+    return clone().normalize_(p, dim);
+  }
+
+  /// Performs `L_p` normalization of inputs over specified dimension. Operates in place.
+  /// @param {number} [p=2] The exponent value in the norm formulation
+  /// @param {number} [dim=1] The dimension to reduce
+  /// @returns {Tensor} `this` for operation chaining.
+  Tensor normalize_([double p = 2.0, int dim = 1]) {
     dim = safeIndex(dim, dims.length);
 
-    final norm = await this.norm(p, dim, true);
+    final norm = this.norm(p, dim, true);
 
-    final this_data = data.toList();
+    final this_data = data;
     final norm_data = norm.data;
     for (int i = 0; i < this_data.length; ++i) {
 
@@ -484,18 +503,42 @@ class Tensor<T> {
       }
 
       // Divide by normalized value
-      this_data[i] = ((this_data[i] as num) / (norm_data[resultIndex] as num)) as T;
+      ort_tensor[i] = ((ort_tensor[i] as num) / (norm_data[resultIndex] as num)) as T;
     }
 
-    await norm.dispose();
-    await dispose();
-    return await create<T>(type, this_data, dims);
+    norm.dispose();
+
+    return this;
   }
 
   /// Compute and return the stride of this tensor.
   /// Stride is the jump necessary to go from one element to the next one in the specified dimension dim.
   /// @returns {number[]} The stride of this tensor.
   List<int> stride() => dimsToStride(dims);
+
+  /// Returns a tensor with all specified dimensions of input of size 1 removed.
+  ///
+  /// NOTE: The returned tensor shares the storage with the input tensor, so changing the contents of one will change the contents of the other.
+  /// If you would like a copy, use `tensor.clone()` before squeezing.
+  ///
+  /// @param {number|number[]} [dim=null] If given, the input will be squeezed only in the specified dimensions.
+  /// @returns {Tensor} The squeezed tensor
+  Tensor<T> squeeze(int dim) {
+    return create<T>(
+      type,
+      data,
+      calc_squeeze_dims(dims, dim),
+    );
+  }
+
+  /// In-place version of @see {@link Tensor.squeeze}
+  Tensor<T> squeeze_(int dim) {
+    return this..ort_tensor = onnx.Tensor.create<T>(
+      dataType: type,
+      data: data,
+      shape: calc_squeeze_dims(dims, dim),
+    );
+  }
 
   /// Returns a new tensor with a dimension of size one inserted at the specified position.
   ///
@@ -504,19 +547,27 @@ class Tensor<T> {
   /// @param {number} dim The index at which to insert the singleton dimension
   /// @returns {Tensor} The unsqueezed tensor
   /// TODO: [dim] seems like it can be null but if it is then it is just an empty array in JS. Verify how this should be handled.
-  Future<Tensor<T>> unsqueeze(int dim) async {
-    await dispose();
-    return await create<T>(
+  Tensor<T> unsqueeze(int dim) {
+    return create<T>(
       type,
       data,
       calc_unsqueeze_dims(dims, dim),
     );
   }
 
+  /// In-place version of @see {@link Tensor.unsqueeze}
+  Tensor<T> unsqueeze_(int dim) {
+    return this..ort_tensor = onnx.Tensor.create<T>(
+      dataType: type,
+      data: data,
+      shape: calc_unsqueeze_dims(dims, dim),
+    );
+  }
+
   /// Returns a new tensor with the same data as the `self` tensor but of a different `shape`.
   /// @param  {...number} dims the desired size
   /// @returns {Tensor} The tensor with the same data but different shape
-  Future<Tensor<T>> view(List<int> dims) async {
+  Tensor<T> view(List<int> dims) {
     // TODO: validate dims
     int inferredIndex = -1;
     for (int i = 0; i < dims.length; ++i) {
@@ -545,6 +596,15 @@ class Tensor<T> {
 
     // TODO: There is a not about "uses same underlying storage" is this going to be a problem?
     return Tensor.create(type, this_data, dims); // NOTE: uses same underlying storage
+  }
+}
+
+/// Creates a view to another [Tensor] by subarray.
+class TensorSubarray<T> extends Tensor<T> {
+  TensorSubarray._(super.ort_tensor) : super._();
+
+  static TensorSubarray<T> subarray<T>(Tensor<T> tensor, List<int> iterDims, [int? begin, int? end]) {
+    return TensorSubarray<T>._(onnx.TensorSubarray.subarray<T>(tensor.ort_tensor, iterDims, begin, end));
   }
 }
 
@@ -648,7 +708,7 @@ Future<Tensor> interpolate_4d<T>(Tensor<T> input, {
     Interpolate4dMode.bicubic => await TensorOpRegistry.bicubic_interpolate_4d,
   };
 
-  final sizeTensor = await Tensor.create(
+  final sizeTensor = Tensor.create(
     TensorDataType.int64,
     targetDims,
     [targetDims.length],
@@ -682,7 +742,7 @@ Future<(Tensor, Tensor)> topk(Tensor x, [int? k]) async {
 
   final [topK, indicies] = await op({
     'x': x,
-    'k': await Tensor.create(
+    'k': Tensor.create(
       TensorDataType.int64,
       [k],
       [1],
@@ -691,7 +751,7 @@ Future<(Tensor, Tensor)> topk(Tensor x, [int? k]) async {
   return (topK, indicies);
 }
 
-Future<Tensor> arrayToIndexTensor(List<int> array) async => await Tensor.create<int>(
+Tensor arrayToIndexTensor(List<int> array) => Tensor.create<int>(
   TensorDataType.int64,
   array,
   [array.length],
@@ -708,10 +768,10 @@ Future<Tensor> slice(Tensor data, List<int> starts, List<int> ends, List<int> ax
   final op = await TensorOpRegistry.slice;
   return (await op({
     'x': data,
-    's': await arrayToIndexTensor(starts),
-    'e': await arrayToIndexTensor(ends),
-    'a': await arrayToIndexTensor(axes),
-    't': await arrayToIndexTensor(steps ?? List.filled(axes.length, 1)),
+    's': arrayToIndexTensor(starts),
+    'e': arrayToIndexTensor(ends),
+    'a': arrayToIndexTensor(axes),
+    't': arrayToIndexTensor(steps ?? List.filled(axes.length, 1)),
   })).first;
 }
 
@@ -719,11 +779,11 @@ Future<Tensor> slice(Tensor data, List<int> starts, List<int> ends, List<int> ax
 /// @param {Tensor} last_hidden_state Tensor of shape [batchSize, seqLength, embedDim]
 /// @param {Tensor} attention_mask Tensor of shape [batchSize, seqLength]
 /// @returns {Tensor} Returns a new Tensor of shape [batchSize, embedDim].
-Future<Tensor> mean_pooling(Tensor last_hidden_state, Tensor attention_mask) async {
+Tensor mean_pooling(Tensor last_hidden_state, Tensor attention_mask) {
   // last_hidden_state: [batchSize, seqLength, embedDim]
   // attention_mask:    [batchSize, seqLength]
   final lastHiddenStateData = last_hidden_state.data;
-  final attentionMaskData = List<num>.from(attention_mask.data);
+  final attentionMaskData = attention_mask.data.cast<num>();
 
   final shape = [last_hidden_state.dims[0], last_hidden_state.dims[2]];
 
@@ -754,11 +814,33 @@ Future<Tensor> mean_pooling(Tensor last_hidden_state, Tensor attention_mask) asy
     }
   }
 
-  return await Tensor.create(
+  return Tensor.create(
     last_hidden_state.type,
     returnedData,
     shape,
   );
+}
+
+/// Helper function to calculate new dimensions when performing a squeeze operation.
+/// @param {number[]} dims The dimensions of the tensor.
+/// @param {number|number[]|null} dim The dimension(s) to squeeze.
+/// @returns {number[]} The new dimensions.
+/// @private
+List<int> calc_squeeze_dims(List<int> dims, [dynamic dim]) {
+  dims = dims.toList();
+  if (dim == null) {
+    dims = dims.where((d) => d != 1).toList();
+  } else if (dim is int) {
+    if (dims[dim] == 1) {
+      dims.removeRange(dim, dim + 1);
+    }
+  } else if (dim is List<int>) {
+    dims = dims.indexed.where((e) {
+      final (i, x) = e;
+      return x != 1 || !dim.contains(i);
+    }).map((e) => e.$2).toList();
+  }
+  return dims;
 }
 
 /// Helper function to calculate new dimensions when performing an unsqueeze operation.
@@ -804,7 +886,7 @@ int safeIndex(int index, int size, [int? dimension, bool boundsCheck = true]) {
 /// @param {Tensor[]} tensors The array of tensors to concatenate.
 /// @param {number} dim The dimension to concatenate along.
 /// @returns {Tensor} The concatenated tensor.
-Future<Tensor<T>> cat<T>(List<Tensor<T>> tensors, [int dim = 0]) async {
+Tensor<T> cat<T>(List<Tensor<T>> tensors, [int dim = 0]) {
   dim = safeIndex(dim, tensors[0].dims.length);
 
   // TODO do validation of shapes
@@ -858,17 +940,17 @@ Future<Tensor<T>> cat<T>(List<Tensor<T>> tensors, [int dim = 0]) async {
     }
   }
 
-  return await Tensor.create(resultType, result, resultDims);
+  return Tensor.create(resultType, result, resultDims);
 }
 /// Stack an array of tensors along a specified dimension.
 /// @param {Tensor[]} tensors The array of tensors to stack.
 /// @param {number} dim The dimension to stack along.
 /// @returns {Tensor} The stacked tensor.
-Future<Tensor<T>> stack<T>(List<Tensor<T>> tensors, [int dim = 0]) async {
+Tensor<T> stack<T>(List<Tensor<T>> tensors, [int dim = 0]) {
   // TODO do validation of shapes
   // NOTE: stack expects each tensor to be equal size
-  return await cat(
-    await Future.wait(tensors.map((t) => t.unsqueeze(dim))),
+  return cat(
+    tensors.map((t) => t.unsqueeze(dim)).toList(),
     dim,
   );
 }
@@ -930,9 +1012,9 @@ List<int> dimsToStride(List<int> dims) {
   return stride;
 }
 
-Future<Tensor<T>> fullHelper<T>(List<int> size, T fill_value, TensorDataType dtype) async {
+Tensor<T> fullHelper<T>(List<int> size, T fill_value, TensorDataType dtype) {
   final numElements = size.fold(1, (a, b) => a * b);
-  return await Tensor.create(
+  return Tensor.create(
     dtype,
     List.filled(numElements, fill_value),
     size,
@@ -943,7 +1025,7 @@ Future<Tensor<T>> fullHelper<T>(List<int> size, T fill_value, TensorDataType dty
 /// @param {number[]} size A sequence of integers defining the shape of the output tensor.
 /// @param {number|bigint|boolean} fill_value The value to fill the output tensor with.
 /// @returns {Tensor} The filled tensor.
-Future<Tensor<T>> full<T>(List<int> size, T fill_value, [TensorDataType? dtype]) async {
+Tensor<T> full<T>(List<int> size, T fill_value, [TensorDataType? dtype]) {
   if (dtype == null) {
     if (fill_value is double) {
       // TODO: In js this is float32. It might make sense to use float64 since this isn't js. This could make things slower though...
@@ -958,39 +1040,39 @@ Future<Tensor<T>> full<T>(List<int> size, T fill_value, [TensorDataType? dtype])
     }
   }
 
-  return await fullHelper(size, fill_value, dtype);
+  return fullHelper(size, fill_value, dtype);
 }
 
-Future<Tensor<T>> full_like<T>(Tensor<T> tensor, T fill_value, [TensorDataType? dtype]) async {
-  return await full(tensor.dims, fill_value, dtype);
+Tensor<T> full_like<T>(Tensor<T> tensor, T fill_value, [TensorDataType? dtype]) {
+  return full(tensor.dims, fill_value, dtype);
 }
 
 /// Returns a tensor filled with the scalar value 1, with the shape defined by the variable argument size.
 /// @param {number[]} size A sequence of integers defining the shape of the output tensor.
 /// @returns {Tensor} The ones tensor.
-Future<Tensor<int>> ones(List<int> size) async {
-  return await fullHelper(size, 1, TensorDataType.int64);
+Tensor<int> ones(List<int> size) {
+  return fullHelper(size, 1, TensorDataType.int64);
 }
 
 /// Returns a tensor filled with the scalar value 1, with the same size as input.
 /// @param {Tensor} tensor The size of input will determine size of the output tensor.
 /// @returns {Tensor} The ones tensor.
-Future<Tensor<int>> ones_like(Tensor tensor) async {
-  return await ones(tensor.dims);
+Tensor<int> ones_like(Tensor tensor) {
+  return ones(tensor.dims);
 }
 
 /// Returns a tensor filled with the scalar value 0, with the shape defined by the variable argument size.
 /// @param {number[]} size A sequence of integers defining the shape of the output tensor.
 /// @returns {Tensor} The zeros tensor.
-Future<Tensor<int>> zeros(List<int> size) async {
-  return await fullHelper(size, 0, TensorDataType.int64);
+Tensor<int> zeros(List<int> size) {
+  return fullHelper(size, 0, TensorDataType.int64);
 }
 
 /// Returns a tensor filled with the scalar value 0, with the same size as input.
 /// @param {Tensor} tensor The size of input will determine size of the output tensor.
 /// @returns {Tensor} The zeros tensor.
-Future<Tensor<int>> zeros_like(Tensor tensor) async {
-  return await zeros(tensor.dims);
+Tensor<int> zeros_like(Tensor tensor) {
+  return zeros(tensor.dims);
 }
 
 enum QuantizeEmbeddingsPrecision { binary, ubinary }
@@ -999,7 +1081,7 @@ enum QuantizeEmbeddingsPrecision { binary, ubinary }
 /// @param {Tensor} tensor The tensor to quantize.
 /// @param {'binary'|'ubinary'} precision The precision to use for quantization.
 /// @returns {Tensor} The quantized tensor.
-Future<Tensor> quantize_embeddings(Tensor tensor, QuantizeEmbeddingsPrecision precision) async {
+Tensor quantize_embeddings(Tensor tensor, QuantizeEmbeddingsPrecision precision) {
   if (tensor.dims.length != 2) {
     throw ArgumentError("The tensor must have 2 dimensions");
   }
@@ -1030,7 +1112,7 @@ Future<Tensor> quantize_embeddings(Tensor tensor, QuantizeEmbeddingsPrecision pr
     }
   };
 
-  return await Tensor.create(
+  return Tensor.create(
     dtype,
     outputData,
     [tensor.dims[0], (tensor.dims[1] / 8).floor()],

@@ -33,10 +33,10 @@ dependencies:
   unorm_dart: ^0.3.2
   path: ^1.9.1
   dio: ^5.9.0
-  image: ^4.5.4
-  flutter_onnxruntime: ^1.5.2
+  image: ^4.7.1
+  ort: ^0.0.3
   path_provider: ^2.1.5
-  crypto: ^3.0.6
+  crypto: ^3.0.7
   jinja_minimal: ^1.0.0
 
 dev_dependencies:

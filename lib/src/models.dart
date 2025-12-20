@@ -1,6 +1,7 @@
 // ignore_for_file: non_constant_identifier_names
 
-import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
+import 'package:ort/ort.dart' hide Tensor, DeviceType;
+import 'package:ort/ort.dart' as ort;
 import 'package:transformers/extensions/list_extensions.dart';
 import 'package:transformers/src/backends/onnx.dart' hide Tensor;
 import 'package:transformers/src/configs.dart';
@@ -52,7 +53,7 @@ final Map<Type, String> MODEL_CLASS_TO_NAME_MAPPING = {};
 /// @param {import('./utils/hub.js').PretrainedModelOptions} options Additional options for loading the model.
 /// @returns {Promise<{buffer_or_path: Uint8Array|string, session_options: Object, session_config: Object}>} A Promise that resolves to the data needed to create an InferenceSession object.
 /// @private
-Future<(String, OrtSessionOptions, Map<String, dynamic>)> getSession(
+Future<(String, Map<String, dynamic>, Map<String, dynamic>)> getSession(
   String pretrained_model_name_or_path,
   String fileName,
   PretrainedModelOptions options,
@@ -78,7 +79,7 @@ Future<(String, OrtSessionOptions, Map<String, dynamic>)> getSession(
   // If the device is not specified, we use the default (supported) execution providers.
   final DeviceType selectedDevice = device ?? DeviceType.cpu;
 
-  final executionProviders = await deviceToExecutionProviders(selectedDevice);
+  final executionProviders = deviceToExecutionProviders(selectedDevice);
 
   // Update custom config with the selected device's config, if it exists
   final device_config = custom_config.device_config ?? {};
@@ -157,23 +158,16 @@ Future<(String, OrtSessionOptions, Map<String, dynamic>)> getSession(
   final baseName = '$fileName$suffix.onnx';
   final modelFileName = '${options.subfolder}/$baseName';
 
-  OrtSessionOptions session_options = options.session_options?.clone() ?? OrtSessionOptions();
+  Map<String, dynamic> session_options = options.session_options ?? {};
 
   // Overwrite `executionProviders` if not specified
-  session_options = session_options.cloneWith(
-    providers: session_options.providers ?? executionProviders,
-  );
+  session_options['executionProviders'] ??= executionProviders;
 
   // Overwrite `freeDimensionOverrides` if specified in config and not set in session options
   final free_dimension_overrides = custom_config.free_dimension_overrides;
   if (free_dimension_overrides != null) {
-    // TODO: flutter_onnxruntime doesn't have freeDimensionOverrides
-    // session_options.freeDimensionOverrides ??= free_dimension_overrides;
-  } else if (
-    selectedDevice.value.startsWith('webnn')
-      // TODO: flutter_onnxruntime doesn't have freeDimensionOverrides
-      // && session_options.freeDimensionOverrides == null
-  ) {
+    session_options['freeDimensionOverrides'] ??= free_dimension_overrides;
+  } else if (selectedDevice.value.startsWith('webnn') && session_options['freeDimensionOverrides'] == null) {
     // console.warn
     print(
       "WebNN does not currently support dynamic shapes and requires 'free_dimension_overrides' to be set in config.json, preferably as a field within config[\"transformers.js_config\"][\"device_config\"][\"$selectedDevice\"]. "
@@ -223,24 +217,21 @@ Future<(String, OrtSessionOptions, Map<String, dynamic>)> getSession(
       })());
     }
   }
-  // TODO: flutter_onnxruntime doesn't support externalData
-  // else if (session_options.externalData != null) {
-  //   externalDataPromises = session_options.externalData.map(async (ext) => {
+  // TODO: Get this working
+  // else if (session_options['externalData'] != null) {
+  //   externalDataPromises = (session_options['externalData'] as List<Map>).map((ext) async {
   //     // if the external data is a string, fetch the file and replace the string with its content
-  //     // @ts-expect-error TS2339
-  //     if (typeof ext.data === "string") {
-  //       // @ts-expect-error TS2339
-  //       const ext_buffer = await getModelFile(pretrained_model_name_or_path, ext.data, true, options);
-  //       // @ts-expect-error TS2698
-  //       return { ...ext, data: ext_buffer };
+  //     if (ext['data'] is String) {
+  //       final ext_buffer = await getModelFile(pretrained_model_name_or_path, ext['data'], true, options);
+  //       return { ...ext, 'data': ext_buffer };
   //     }
   //     return ext;
-  //   });
+  //   }).toList();
   // }
 
   if (externalDataPromises.isNotEmpty) {
     final externalData = await Future.wait(externalDataPromises);
-    // TODO: flutter_onnxruntime doesn't support externalData
+    // TODO: Pretty sure this is essentially always false
     // if (!apis.IS_NODE_ENV) {
     //   session_options.externalData = externalData;
     // }
@@ -272,7 +263,7 @@ Future<(String, OrtSessionOptions, Map<String, dynamic>)> getSession(
 /// @param {import('./utils/hub.js').PretrainedModelOptions} options Additional options for loading the model.
 /// @returns {Promise<Record<string, any>>} A Promise that resolves to a dictionary of InferenceSession objects.
 /// @private
-Future<Map<String, OrtSession>> constructSessions(
+Future<Map<String, Session>> constructSessions(
   String pretrained_model_name_or_path,
   Map<String, String> names,
   PretrainedModelOptions options,
@@ -310,7 +301,7 @@ Future<Map<String, Map<String, dynamic>>> getOptionalConfigs(
 /// @returns {Record<string, Tensor>} The checked inputs.
 /// @throws {Error} If any inputs are missing.
 /// @private
-Future<Map<String, dynamic>> validateInputs(OrtSession session, Map<String, dynamic> inputs) async {
+Future<Map<String, dynamic>> validateInputs(Session session, Map<String, dynamic> inputs) async {
   /**
    * NOTE: Create either a shallow or deep copy based on `onnx.wasm.proxy`
    * @type {Record<string, Tensor>}
@@ -357,16 +348,19 @@ Future<Map<String, dynamic>> validateInputs(OrtSession session, Map<String, dyna
 /// @param {Object} inputs An object that maps input names to input tensors.
 /// @returns {Promise<Object>} A Promise that resolves to an object that maps output names to output tensors.
 /// @private
-Future<Map<String, Tensor<dynamic>>> sessionRun(OrtSession session, Map<String, dynamic> inputs) async {
+Future<Map<String, Tensor<dynamic>>> sessionRun(Session session, Map<String, dynamic> inputs) async {
   final checkedInputs = await validateInputs(session, inputs);
   try {
     // pass the original ort tensor
-    final ortFeed = checkedInputs.map((k, v) => MapEntry(k, (v as Tensor).ort_tensor.ortValue));
+    final ortFeed = checkedInputs.map((k, v) => MapEntry(
+      k,
+      (v as Tensor).ort_tensor.ortTensor,
+    ));
     // run() => session.run(ortFeed);
     // final output = await ((apis.IS_BROWSER_ENV || apis.IS_WEBWORKER_ENV)
     //     ? (webInferenceChain = webInferenceChain.then(run))
     //     : run());
-    final Map<String, OrtValue> output = await session.run(ortFeed);
+    final Map<String, ort.Tensor> output = await session.run(inputValues: ortFeed);
     return replaceTensors(output);
   } catch (e) {
     // Error messages can be long (nested) and uninformative. For this reason,
@@ -399,10 +393,10 @@ Future<Map<String, Tensor<dynamic>>> sessionRun(OrtSession session, Map<String, 
 /// @param {Object} obj The object to replace tensor objects in.
 /// @returns {Object} The object with tensor objects replaced by custom Tensor objects.
 /// @private
-Future<Map<String, Tensor>> replaceTensors(Map<String, OrtValue> obj) async {
+Future<Map<String, Tensor>> replaceTensors(Map<String, ort.Tensor> obj) async {
   return Map.fromEntries(
       await Future.wait(
-          obj.entries.map((e) async => MapEntry(e.key, await Tensor.createFromOrtValue(e.value)))
+          obj.entries.map((e) async => MapEntry(e.key, await Tensor.createFromOrtTensor(e.value)))
       )
   );
 }
@@ -453,7 +447,7 @@ Future<Tensor<bool>> boolTensor(bool value) async {
 
 abstract class AbstractPreTrainedModel {
   /// The inference sessions for the model.
-  Map<String, OrtSession> get sessions;
+  Map<String, Session> get sessions;
 
   /// PretrainedConfig config The model configuration.
   PretrainedConfig? get config;
@@ -505,7 +499,7 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
     final other_decoder_inputs = model_inputs;
     // Encode if needed
     if (encoder_outputs == null) {
-      final encoder_inputs = pick(model_inputs, sessions['model']!.inputNames);
+      final encoder_inputs = pick(model_inputs, sessions['model']!.inputNames.toList(growable: false));
       // Encoder outputs are not given, so we must compute them.
       encoder_outputs = (await encoderForward(encoder_inputs))['last_hidden_state'];
     }
@@ -529,7 +523,7 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
   /// @private
   Future<Map<String, Tensor>> encoderForward(Map<String, dynamic> model_inputs, [bool _ = false]) async {
     final session = sessions['model']!;
-    final encoderFeeds = pick(model_inputs, session.inputNames);
+    final encoderFeeds = pick(model_inputs, session.inputNames.toList(growable: false));
 
     if (session.inputNames.contains('inputs_embeds') && encoderFeeds['inputs_embeds'] == null) {
       if (model_inputs['input_ids'] == null) {
@@ -591,7 +585,7 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
     await addPastKeyValues(new_model_inputs, past_key_values);
 
     // Select only the inputs that are needed for the current session
-    final fixed = pick(new_model_inputs, session.inputNames);
+    final fixed = pick(new_model_inputs, session.inputNames.toList(growable: false));
     return await sessionRun(session, fixed);
   }
 
@@ -904,13 +898,12 @@ Future<({Tensor inputs_embeds, dynamic attention_mask})> default_merge_input_ids
   }
 
   // Equivalent to performing a masked_scatter
-  // TODO: This NEEDS to be improved it is REALLY BAD
   int img = 0;
   for (int i = 0; i < token_positions.length; ++i) {
     final tokens = token_positions[i];
     final embeds = await inputs_embeds[i];
     for (int j = 0; j < tokens.length; ++j) {
-      await (await embeds[tokens[j]]).updateData(((await modality_features[img++]).data));
+      (await embeds[tokens[j]]).data.setAll(0, (await modality_features[img++]).data);
     }
   }
   return (inputs_embeds: inputs_embeds, attention_mask: attention_mask);
@@ -935,7 +928,7 @@ Future<({Tensor inputs_embeds, dynamic attention_mask})> default_merge_input_ids
 /// @returns {{data: BigInt64Array, dims: number[]}}
 (List<int>, List<int>) cumsum_masked_fill(Tensor attention_mask, [int start_index = 0]) {
   final [int bz, int seq_len] = attention_mask.dims;
-  final List<int> attn_mask_data = List<int>.from(attention_mask.data);
+  final List<int> attn_mask_data = attention_mask.data.cast<int>();
 
   final List<int> data = List<int>.filled(attn_mask_data.length, 0);
   for (int i=0; i < bz; ++i) {
@@ -990,7 +983,7 @@ class PreTrainedModelReflection {
 
   final PreTrainedModel Function(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) constructor;
 
@@ -1019,7 +1012,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
 
   /// The inference sessions for the model.
   @override
-  final Map<String, OrtSession> sessions;
+  final Map<String, Session> sessions;
 
   /// Additional configuration files (e.g., generation_config.json).
   final Map<String, Map<String, dynamic>> configs;
@@ -1046,7 +1039,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
 
   static PreTrainedModel constructor(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) => PreTrainedModel(_reflection, config, sessions, configs);
 
@@ -1114,7 +1107,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
   /// @returns {Promise<unknown[]>} An array of promises, one for each ONNX session that is being disposed.
   /// @todo Use https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/FinalizationRegistry
   Future<List<void>> dispose() async {
-    return await Future.wait(sessions.values.map((session) => session.dispose()));
+    return await Future.wait(sessions.values.map((session) async => session.dispose()));
   }
 
   /// Helper method to setup [from_pretrained] with the correct [reflection] inserted.
@@ -1282,7 +1275,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
       ]);
     }
 
-    final Map<String, OrtSession> sessions = info.first;
+    final Map<String, Session> sessions = info.first;
     final Map<String, Map<String, dynamic>> configs = info.length == 1 ? {} : info.last;
 
     return reflection.constructor(config, sessions, configs);
@@ -1902,7 +1895,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
     // TODO make > numInputs
     final scores = List<double>.filled(numInputs, 0);
     final List<List<int>> all_input_ids = input_ids.tolist()
-        .map((x) => List<int>.from(x)).toList();
+        .map((x) => (x as List).cast<int>()).toList();
     if (streamer != null) {
       streamer.put(all_input_ids);
     }
@@ -2091,16 +2084,25 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
     } else {
       // TODO: Unfortunately, flutter_onnxruntime doesn't actually expose this config we add it on using extensions
       final session = sessions['decoder_model_merged'] ?? sessions['model'];
-      final dtype = session?.config['kv_cache_dtype'] ?? 'float32';
-      final empty = [];
-
       final batch_size = (
           (decoderFeeds[main_input_name] ?? decoderFeeds['attention_mask']) as Tensor?
       )?.dims[0] ?? 1;
-      final shapes = getKeyValueShapes(config, batch_size: batch_size);
 
+      // NOTE: This might be needed in the future but since in the js code it
+      // checks if it is a float16 and uses that type otherwise it uses float32
+      // and since on the ort side it uses float32 as float16 we can just use
+      // float32 only.
+
+      // final dtype = session?.config['kv_cache_dtype'] ?? 'float32';
+      final dtype = TensorDataType.float32;
+      final shapes = getCacheShapes(config!, { 'batch_size': batch_size });
       for (final name in shapes.keys) {
-        decoderFeeds[name] = await Tensor.create(dtype, empty, shapes[name]);
+        final size = shapes[name]!.fold(1, (a, b) => a * b);
+        decoderFeeds[name] = await Tensor.create(
+          dtype,
+          List.filled(size, 0),
+          shapes[name],
+        );
       }
     }
   }
@@ -2141,7 +2143,7 @@ class BertModel extends BertPreTrainedModel {
 
   static PreTrainedModel constructor(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) => BertModel(_reflection, config, sessions, configs);
 
@@ -2165,7 +2167,7 @@ class BertForMaskedLM extends BertPreTrainedModel {
 
   static PreTrainedModel constructor(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) => BertForMaskedLM(_reflection, config, sessions, configs);
 
@@ -2204,7 +2206,7 @@ class XLMRobertaModel extends XLMRobertaPreTrainedModel {
 
   static PreTrainedModel constructor(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) => XLMRobertaModel(_reflection, config, sessions, configs);
 
@@ -2228,7 +2230,7 @@ class XLMRobertaForMaskedLM extends XLMRobertaPreTrainedModel {
 
   static PreTrainedModel constructor(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) => XLMRobertaForMaskedLM(_reflection, config, sessions, configs);
 
@@ -2279,7 +2281,7 @@ class Idefics3ForConditionalGeneration extends Idefics3PreTrainedModel {
 
   static PreTrainedModel constructor(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) => Idefics3ForConditionalGeneration(_reflection, config, sessions, configs);
 
@@ -2339,7 +2341,7 @@ class GPT2LMHeadModel extends GPT2PreTrainedModel {
 
   static PreTrainedModel constructor(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) => GPT2LMHeadModel(_reflection, config, sessions, configs);
 
@@ -2371,7 +2373,7 @@ class GraniteMoeHybridModel extends GraniteMoeHybridPreTrainedModel {
 
   static PreTrainedModel constructor(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) => GraniteMoeHybridModel(_reflection, config, sessions, configs);
 
@@ -2393,7 +2395,7 @@ class GraniteMoeHybridForCausalLM extends GraniteMoeHybridPreTrainedModel {
 
   static PreTrainedModel constructor(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) => GraniteMoeHybridForCausalLM(_reflection, config, sessions, configs);
 
@@ -2426,7 +2428,7 @@ class Qwen3Model extends Qwen3PreTrainedModel {
 
   static PreTrainedModel constructor(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) => Qwen3Model(_reflection, config, sessions, configs);
 
@@ -2449,7 +2451,7 @@ class Qwen3ForCausalLM extends Qwen3PreTrainedModel {
 
   static PreTrainedModel constructor(
     PretrainedConfig? config,
-    Map<String, OrtSession> sessions,
+    Map<String, Session> sessions,
     Map<String, Map<String, dynamic>> configs,
   ) => Qwen3ForCausalLM(_reflection, config, sessions, configs);
 

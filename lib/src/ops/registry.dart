@@ -1,6 +1,6 @@
-import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
 import 'package:transformers/src/backends/onnx.dart' show createInferenceSessionBytes;
 import 'package:transformers/src/utils/tensor.dart';
+import 'package:ort/ort.dart' as ort;
 
 typedef WrapReturnFunctionType = Future<List<Tensor>> Function(Map<String, Tensor> inputs);
 
@@ -13,19 +13,23 @@ typedef WrapReturnFunctionType = Future<List<Tensor>> Function(Map<String, Tenso
 ///
 /// @returns {Promise<function(Record<string, Tensor>): Promise<T extends string ? Tensor : T extends string[] ? { [K in keyof T]: Tensor } : never>>}
 /// The wrapper function for running the ONNX inference session.
-Future<WrapReturnFunctionType> wrap(List<int> session_bytes, OrtSessionOptions session_options, List<String> names) async {
+Future<WrapReturnFunctionType> wrap(List<int> session_bytes, Map<String, dynamic> session_options, List<String> names) async {
   final session = await createInferenceSessionBytes(session_bytes, session_options);
 
   Future<List<Tensor>> op(Map<String, Tensor> inputs) async {
-    final Map<String, OrtValue> ortFeed = Map.fromEntries(
-        inputs.entries.map((e) => MapEntry(e.key, e.value.ort_tensor.ortValue)));
+    final Map<String, ort.Tensor> ortFeed = Map.fromEntries(
+      inputs.entries.map((e) => MapEntry(
+        e.key,
+        e.value.ort_tensor.ortTensor,
+      )),
+    );
 
-    final outputs = await session.run(ortFeed);
+    final outputs = await session.run(inputValues: ortFeed);
 
     if (names.length > 1) {
-      return await Future.wait(names.map((n) => Tensor.createFromOrtValue(outputs[n]!)));
+      return names.map((n) => Tensor.createFromOrtTensor(outputs[n]!)).toList();
     } else {
-      return [await Tensor.createFromOrtValue(outputs[names.first]!)];
+      return [Tensor.createFromOrtTensor(outputs[names.first]!)];
     }
   }
 
@@ -34,7 +38,7 @@ Future<WrapReturnFunctionType> wrap(List<int> session_bytes, OrtSessionOptions s
 
 // In-memory registry of initialized ONNX operators
 class TensorOpRegistry {
-  static final OrtSessionOptions session_options = OrtSessionOptions();
+  static final Map<String, dynamic> session_options = {};
   // {
   //   // TODO: Allow for multiple execution providers
   //   // executionProviders: ['webgpu'],
