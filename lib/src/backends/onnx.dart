@@ -27,7 +27,7 @@ final List<ExecutionProvider> defaultDevices = [CPUExecutionProvider()];
 List<ExecutionProvider>? _supportedDevices;
 
 /// Get the list of supported devices, sorted by priority/performance.
-/// TODO: Check if we need to handle sorted by priority/performance or if the flutter_onnxruntime does this already.
+/// TODO: we need to handle sorted by priority/performance
 List<ExecutionProvider> getSupportedDevices() {
   if (_supportedDevices != null) return _supportedDevices!;
 
@@ -35,14 +35,14 @@ List<ExecutionProvider> getSupportedDevices() {
   return _supportedDevices!;
 }
 
-/// This is a wrapper class around the flutter_onnxruntime [OrtValue] to make
+/// This is a wrapper class around the ort library's [OrtValue] to make
 /// things easier to work with.
 class Tensor<T> with ListMixin<T> {
   /// The type of the data stored in the tensor
   final TensorDataType dataType;
 
   /// The data stored in the tensor
-  List<T> data;
+  List<T> get data => ortTensor.data.cast<T>();
 
   /// The shape of the data
   final List<int> shape;
@@ -50,7 +50,7 @@ class Tensor<T> with ListMixin<T> {
   /// The underlying reference to the onnx tensor
   ort.Tensor ortTensor;
 
-  Tensor._(this.dataType, this.data, this.shape, this.ortTensor);
+  Tensor._(this.dataType, this.shape, this.ortTensor);
 
   /// The shape/dimension of the tensor
   List<int> get dims => ortTensor.shape;
@@ -81,11 +81,12 @@ class Tensor<T> with ListMixin<T> {
       shape: shape,
     );
 
-    return Tensor._(dataType, data, shape, ortValue);
+    return Tensor._(dataType, shape, ortValue);
   }
 
   static Tensor<T> createFromOrtTensor<T>(ort.Tensor ortTensor) {
     final TensorDataType dataType = switch (ortTensor.dtype) {
+      TensorElementType.float64 => TensorDataType.float64,
       TensorElementType.float32 => TensorDataType.float32,
       TensorElementType.float16 => TensorDataType.float16,
       TensorElementType.bfloat16 => TensorDataType.bfloat16,
@@ -107,25 +108,21 @@ class Tensor<T> with ListMixin<T> {
       TensorElementType.complex128 => throw UnimplementedError(
           'OrtDataType.complex128 is not currently supported'),
 
-      TensorElementType.float64 => throw UnimplementedError(),
       TensorElementType.float8E4M3Fn => throw UnimplementedError(),
       TensorElementType.float8E4M3Fnuz => throw UnimplementedError(),
       TensorElementType.float8E5M2 => throw UnimplementedError(),
       TensorElementType.float8E5M2Fnuz => throw UnimplementedError(),
       TensorElementType.uint4 => throw UnimplementedError(),
       TensorElementType.int4 => throw UnimplementedError(),
-      TensorElementType.undefined => throw UnimplementedError(),
+      TensorElementType.undefined => throw ArgumentError('Unsupported data type ${TensorElementType.undefined}'),
     };
     final List<int> shape = ortTensor.shape;
-    final List<T> data = ortTensor.data.cast<T>();
 
-    return Tensor._(dataType, data, shape, ortTensor);
+    return Tensor._(dataType, shape, ortTensor);
   }
 
   static TensorElementType _tensorDataTypeToOrtDataType(TensorDataType dataType) => switch (dataType) {
-    TensorDataType.float64 => throw UnimplementedError(
-        'float64 is not implemented for the flutter_onnxruntime package'),
-
+    TensorDataType.float64 => TensorElementType.float64,
     TensorDataType.float32 => TensorElementType.float32,
     TensorDataType.float16 => TensorElementType.float16,
     TensorDataType.bfloat16 => TensorElementType.bfloat16,
@@ -154,7 +151,7 @@ class Tensor<T> with ListMixin<T> {
   /// Important: The returned [Tensor] points to the same underlying data and is
   /// not copied into a new Tensor.
   @override
-  Tensor<U> cast<U>() => Tensor._(dataType, data.cast<U>(), shape, ortTensor);
+  Tensor<U> cast<U>() => Tensor._(dataType, shape, ortTensor);
 
   Future<void> dispose() async {
     ortTensor.dispose();
@@ -191,17 +188,17 @@ class TensorSubarray<T> extends Tensor<T> {
   @override
   List<int> get dims => _dims;
 
-  TensorSubarray._(super.dataType, super.data, super.shape, super.ortTensor, this._dims, int? begin, int? end)
+  TensorSubarray._(super.dataType, super.shape, super.ortTensor, this._dims, int? begin, int? end)
       : begin = begin ?? 0,
-        end = end ?? data.length,
+        end = end ?? ortTensor.data.length,
         super._();
 
   static TensorSubarray<T> subarray<T>(Tensor<T> tensor, List<int> iterDims, [int? begin, int? end]) {
-    return TensorSubarray<T>._(tensor.dataType, tensor.data, tensor.shape, tensor.ortTensor, iterDims, begin, end);
+    return TensorSubarray<T>._(tensor.dataType, tensor.shape, tensor.ortTensor, iterDims, begin, end);
   }
 
   @override
-  Tensor<U> cast<U>() => TensorSubarray._(dataType, super.data.cast<U>(), shape, ortTensor, _dims, begin, end);
+  Tensor<U> cast<U>() => TensorSubarray._(dataType, shape, ortTensor, _dims, begin, end);
 
   @override
   set length(int newLength) {

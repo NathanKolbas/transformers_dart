@@ -78,7 +78,7 @@ class Tensor<T> {
     return Tensor<T>._(ort_tensor);
   }
 
-  static Tensor<T> createFromOrtTensor<T>(ort.Tensor ortTensor) {
+  static Tensor<T> createFromOrtTensor<T>(ort.Tensor<T> ortTensor) {
     final ort_tensor = onnx.Tensor.createFromOrtTensor<T>(ortTensor);
 
     return Tensor<T>._(ort_tensor);

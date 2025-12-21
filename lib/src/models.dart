@@ -178,7 +178,7 @@ Future<(String, Map<String, dynamic>, Map<String, dynamic>)> getSession(
   final return_path = true; // Not on the web
   final bufferOrPathPromise = getModelFile(pretrained_model_name_or_path, modelFileName, true, options, return_path);
 
-  // TODO: Handle onnx external data files and see if flutter_onnxruntime even supports this
+  // TODO: Handle onnx external data files and see if ort even supports this
   // Handle onnx external data files
   // ?? custom_config.use_external_data_format
   final dynamic use_external_data_format = options.use_external_data_format ?? custom_config.use_external_data_format;
@@ -2083,7 +2083,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
     if (pastKeyValues != null) {
       decoderFeeds.addAll(pastKeyValues);
     } else {
-      // TODO: Unfortunately, flutter_onnxruntime doesn't actually expose this config we add it on using extensions
+      // TODO: Unfortunately, ort doesn't actually expose this config we add it on using extensions
       final session = sessions['decoder_model_merged'] ?? sessions['model'];
       final batch_size = (
           (decoderFeeds[main_input_name] ?? decoderFeeds['attention_mask']) as Tensor?
