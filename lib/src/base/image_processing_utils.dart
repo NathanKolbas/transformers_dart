@@ -706,8 +706,8 @@ class ImageProcessor {
       }
     }
 
-    Tensor<double> pixel_values = await Tensor.create(TensorDataType.float32, pixelData, imgDims);
-    pixel_values = await pixel_values.permute([2, 0, 1]); // convert to channel dimension format (hwc -> chw)
+    Tensor<double> pixel_values = Tensor.create(TensorDataType.float32, pixelData, imgDims);
+    pixel_values = pixel_values.permute([2, 0, 1]); // convert to channel dimension format (hwc -> chw)
 
     return PreprocessedImage(
       original_size: (srcHeight, srcWidth),
@@ -730,7 +730,7 @@ class ImageProcessor {
     final List<PreprocessedImage> imageData = await Future.wait(images.map((x) => preprocess(x)));
 
     // Stack pixel values
-    final pixel_values = await stack(imageData.map((x) => x.pixel_values).toList(), 0);
+    final pixel_values = stack(imageData.map((x) => x.pixel_values).toList(), 0);
 
     return ImageProcessorResult(
       pixel_values: pixel_values,

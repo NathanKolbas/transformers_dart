@@ -320,7 +320,7 @@ Future<Map<String, dynamic>> validateInputs(Session session, Map<String, dynamic
     // NOTE: When `env.wasm.proxy is true` the tensor is moved across the Worker
     // boundary, transferring ownership to the worker and invalidating the tensor.
     // So, in this case, we simply sacrifice a clone for it.
-    checkedInputs[inputName] = isONNXProxy() ? await tensor.clone() : tensor;
+    checkedInputs[inputName] = isONNXProxy() ? tensor.clone() : tensor;
   }
   if (missingInputs.isNotEmpty) {
     throw Exception('An error occurred during model execution: "Missing the following inputs: ${missingInputs.join(', ')}.');
@@ -393,11 +393,12 @@ Future<Map<String, Tensor<dynamic>>> sessionRun(Session session, Map<String, dyn
 /// @param {Object} obj The object to replace tensor objects in.
 /// @returns {Object} The object with tensor objects replaced by custom Tensor objects.
 /// @private
-Future<Map<String, Tensor>> replaceTensors(Map<String, ort.Tensor> obj) async {
+Map<String, Tensor> replaceTensors(Map<String, ort.Tensor> obj) {
   return Map.fromEntries(
-      await Future.wait(
-          obj.entries.map((e) async => MapEntry(e.key, await Tensor.createFromOrtTensor(e.value)))
-      )
+    obj.entries.map((e) => MapEntry(
+      e.key,
+      Tensor.createFromOrtTensor(e.value),
+    )),
   );
 }
 
@@ -406,7 +407,7 @@ Future<Map<String, Tensor>> replaceTensors(Map<String, ort.Tensor> obj) async {
 /// @returns {Tensor} The int64 Tensor with the converted values.
 /// @throws {Error} If the input array is empty or the input is a batched Tensor and not all sequences have the same length.
 /// @private
-Future<Tensor> toI64Tensor(dynamic items) async {
+Tensor toI64Tensor(dynamic items) {
   if (items is Tensor) {
     return items;
   }
@@ -423,13 +424,13 @@ Future<Tensor> toI64Tensor(dynamic items) async {
       throw Exception("Unable to create tensor, you should probably activate truncation and/or padding with 'padding=True' and/or 'truncation=True' to have batched tensors with the same length.");
     }
 
-    return await Tensor.create(
+    return Tensor.create(
       TensorDataType.int64,
       items.expand((e) => e).toList(),
       [items.length, items[0].length],
     );
   } else {
-    return await Tensor.create(
+    return Tensor.create(
       TensorDataType.int64,
       items,
       [items.length, items[0].length],
@@ -441,8 +442,8 @@ Future<Tensor> toI64Tensor(dynamic items) async {
 /// @param {boolean} value The value of the tensor.
 /// @returns {Tensor} The boolean tensor.
 /// @private
-Future<Tensor<bool>> boolTensor(bool value) async {
-  return await Tensor.create<bool>(TensorDataType.bool, [value], [1]);
+Tensor<bool> boolTensor(bool value) {
+  return Tensor.create<bool>(TensorDataType.bool, [value], [1]);
 }
 
 abstract class AbstractPreTrainedModel {
@@ -537,7 +538,7 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
       }
       // Assign default `token_type_ids` (all zeroes) to the `encoderFeeds` if the model expects it,
       // but they weren't created by the tokenizer.
-      encoderFeeds['token_type_ids'] = await zeros_like(encoderFeeds['input_ids']);
+      encoderFeeds['token_type_ids'] = zeros_like(encoderFeeds['input_ids']);
     }
     if (session.inputNames.contains('pixel_mask') && encoderFeeds['pixel_mask'] == null) {
       if (encoderFeeds['pixel_values'] == null) {
@@ -546,7 +547,7 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
       // Assign default `pixel_mask` (all ones) to the `encoderFeeds` if the model expects it,
       // but they weren't created by the processor.
       final dims = (encoderFeeds['pixel_values'] as Tensor).dims;
-      encoderFeeds['pixel_mask'] = await ones([dims[0], dims[2], dims[3]]);
+      encoderFeeds['pixel_mask'] = ones([dims[0], dims[2], dims[3]]);
     }
 
     return await sessionRun(session, encoderFeeds);
@@ -572,13 +573,13 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
 
     if (session.inputNames.contains('use_cache_branch')) {
       // TODO: Might need to better handle the bool value js: !!past_key_values
-      new_model_inputs['use_cache_branch'] = await boolTensor(past_key_values != null || past_key_values == true);
+      new_model_inputs['use_cache_branch'] = boolTensor(past_key_values != null || past_key_values == true);
     }
     if (session.inputNames.contains('position_ids')
         && new_model_inputs['attention_mask'] != null && new_model_inputs['position_ids'] == null) {
       // NOTE: Handle a special case for paligemma/gemma3 models, where positions are 1-indexed
       final start_index = ['paligemma', 'gemma3_text', 'gemma3'].contains(config?.model_type) ? 1 : 0;
-      new_model_inputs['position_ids'] = await createPositionIds(new_model_inputs, past_key_values, start_index);
+      new_model_inputs['position_ids'] = createPositionIds(new_model_inputs, past_key_values, start_index);
     }
 
     // Unpack the `past_key_values` object into model inputs
@@ -659,9 +660,9 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
         final past_key_values_dim = ((past_key_values as Map).values.first as Tensor).dims;
         final past_length = past_key_values_dim[past_key_values_dim.length - 2];
 
-        attention_mask = await cat([
-          await ones([input_ids.dims[0], past_length]),
-          await (attention_mask as Tensor).slice([null, [attention_mask.dims[1] - target_length, attention_mask.dims[1]]]),
+        attention_mask = cat([
+          ones([input_ids.dims[0], past_length]),
+          (attention_mask as Tensor).slice([null, [attention_mask.dims[1] - target_length, attention_mask.dims[1]]]),
         ], 1);
       }
     }
@@ -717,11 +718,11 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
     });
   }
 
-  Future<Map<String, dynamic>> decoder_prepare_inputs_for_generation(
+  Map<String, dynamic> decoder_prepare_inputs_for_generation(
     List<dynamic> input_ids,
     Map<String, dynamic> model_inputs,
     generation_config,
-  ) async {
+  ) {
     if (model_inputs['past_key_values'] != null) {
       final past_key_value_dims = List<Tensor>.from(model_inputs['past_key_values'].values).first.dims;
       final past_length = past_key_value_dims[past_key_value_dims.length - 2];
@@ -742,7 +743,7 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
       else if (past_length < input_ids.dims[1]) {
         // NOTE: Required for phi models.
         // See https://github.com/huggingface/transformers/issues/30809#issuecomment-2111918479 for more information.
-        model_inputs['input_ids'] = await input_ids.slice([null, [past_length, null]]);
+        model_inputs['input_ids'] = input_ids.slice([null, [past_length, null]]);
       }
       // 3 - Otherwise (past_length >= input_ids.shape[1]), let's assume input_ids only has unprocessed tokens.
       else {
@@ -759,10 +760,10 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
           }
 
           final num_new_tokens = input_ids.dims[1] - (past_length - num_image_tokens);
-          model_inputs['input_ids'] = await input_ids.slice([null, [-num_new_tokens, null]]);
+          model_inputs['input_ids'] = input_ids.slice([null, [-num_new_tokens, null]]);
 
           // TODO: The attention mask should be formed from the attention mask passed in model_inputs
-          model_inputs['attention_mask'] = await ones([1, past_length + num_new_tokens]);
+          model_inputs['attention_mask'] = ones([1, past_length + num_new_tokens]);
         }
       }
     }
@@ -770,61 +771,61 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
     return model_inputs;
   }
 
-  Future<Map<String, dynamic>> encoder_decoder_prepare_inputs_for_generation(
+  Map<String, dynamic> encoder_decoder_prepare_inputs_for_generation(
     List<List<int>> input_ids,
     Map<String, dynamic> model_inputs,
     generation_config,
-  ) async {
+  ) {
     if (model_inputs['past_key_values'] != null) {
       input_ids = input_ids.map((x) => [x.last]).toList();
     }
 
     return {
       ...model_inputs,
-      'decoder_input_ids': await toI64Tensor(input_ids),
+      'decoder_input_ids': toI64Tensor(input_ids),
     };
   }
 
-  Future<Map<String, dynamic>> multimodal_text_to_text_prepare_inputs_for_generation(
-      List<List<int>> input_ids,
-      Map<String, dynamic> model_inputs,
-      generation_config,
-      ) async {
+  Map<String, dynamic> multimodal_text_to_text_prepare_inputs_for_generation(
+    List<List<int>> input_ids,
+    Map<String, dynamic> model_inputs,
+    generation_config,
+  ) {
     if (config?.is_encoder_decoder != true) {
-      return await encoder_decoder_prepare_inputs_for_generation(input_ids, model_inputs, generation_config);
+      return encoder_decoder_prepare_inputs_for_generation(input_ids, model_inputs, generation_config);
     } else {
-      return await decoder_prepare_inputs_for_generation(input_ids, model_inputs, generation_config);
+      return decoder_prepare_inputs_for_generation(input_ids, model_inputs, generation_config);
     }
   }
 
-  Future<Map<String, dynamic>> multimodality_prepare_inputs_for_generation(
+  Map<String, dynamic> multimodality_prepare_inputs_for_generation(
     List<dynamic> input_ids,
     Map<String, dynamic> model_inputs,
     generation_config,
-  ) async {
+  ) {
     final has_past_key_values = model_inputs['past_key_values'] != null;
 
     if (generation_config.guidance_scale != null && generation_config.guidance_scale > 1) {
       if (has_past_key_values) {
-        model_inputs['input_ids'] = await cat([
+        model_inputs['input_ids'] = cat([
           model_inputs['input_ids'] as Tensor,
           model_inputs['input_ids'] as Tensor,
         ], 0);
         // NOTE: attention_mask handled in generation
       } else {
-        model_inputs['input_ids'] = await cat([
+        model_inputs['input_ids'] = cat([
           model_inputs['input_ids'] as Tensor,
-          await full_like(model_inputs['input_ids'], generation_config['pad_token_id']),
+          full_like(model_inputs['input_ids'], generation_config['pad_token_id']),
         ], 0);
-        model_inputs['attention_mask'] = await cat([
+        model_inputs['attention_mask'] = cat([
           model_inputs['attention_mask'] as Tensor,
-          await full_like(model_inputs['attention_mask'], 0),
+          full_like(model_inputs['attention_mask'], 0),
         ], 0);
       }
     }
 
     if (has_past_key_values || model_inputs['pixel_values'] == null) {
-      model_inputs['pixel_values'] = await full([0, 0, 3, 384, 384], 1.0);
+      model_inputs['pixel_values'] = full([0, 0, 3, 384, 384], 1.0);
     }
 
     if (has_past_key_values) {
@@ -833,7 +834,7 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
       const int has_image = num_img_tokens > 0 ? 1 : 0;
 
       const batch_size = 1;
-      model_inputs['images_seq_mask'] = await Tensor.create(
+      model_inputs['images_seq_mask'] = Tensor.create(
         TensorDataType.bool,
         [
           ...List<bool>.filled(num_text_tokens, false),
@@ -841,7 +842,7 @@ mixin PreTrainedModelMixin on AbstractPreTrainedModel {
         ],
         [batch_size, num_img_tokens + num_text_tokens],
       );
-      model_inputs['images_emb_mask'] = await Tensor.create(
+      model_inputs['images_emb_mask'] = Tensor.create(
         TensorDataType.bool,
         List<bool>.filled(num_img_tokens, has_image == 1),
         [batch_size, 1, num_img_tokens],
@@ -901,9 +902,9 @@ Future<({Tensor inputs_embeds, dynamic attention_mask})> default_merge_input_ids
   int img = 0;
   for (int i = 0; i < token_positions.length; ++i) {
     final tokens = token_positions[i];
-    final embeds = await inputs_embeds[i];
+    final embeds = inputs_embeds[i];
     for (int j = 0; j < tokens.length; ++j) {
-      (await embeds[tokens[j]]).data.setAll(0, (await modality_features[img++]).data);
+      embeds[tokens[j]].data.setAll(0,  modality_features[img++].data);
     }
   }
   return (inputs_embeds: inputs_embeds, attention_mask: attention_mask);
@@ -957,16 +958,16 @@ Future<({Tensor inputs_embeds, dynamic attention_mask})> default_merge_input_ids
 /// if past_key_values:
 ///     position_ids = position_ids[:, -input_ids.shape[1] :]
 /// ```
-Future<Tensor<int>> createPositionIds(Map<String, dynamic> model_inputs, [past_key_values = null, int start_index = 0]) async {
+Tensor<int> createPositionIds(Map<String, dynamic> model_inputs, [past_key_values = null, int start_index = 0]) {
   final input_ids = model_inputs['input_ids'],
       inputs_embeds = model_inputs['inputs_embeds'],
       attention_mask = model_inputs['attention_mask'];
 
   final (data, dims) = cumsum_masked_fill(attention_mask, start_index);
-  Tensor<int> position_ids = await Tensor.create(TensorDataType.int64, data, dims);
+  Tensor<int> position_ids = Tensor.create(TensorDataType.int64, data, dims);
   if (past_key_values != null) {
     final offset = -(input_ids ?? inputs_embeds).dims[1];
-    position_ids = await position_ids.slice([null, [offset, null]]);
+    position_ids = position_ids.slice([null, [offset, null]]);
   }
   return position_ids;
 }
@@ -1029,7 +1030,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
   /// method must be implemented.
   final bool _is_prepare_inputs_embeds_supported = false;
 
-  Future<Map<String, dynamic>> Function(
+  Map<String, dynamic> Function(
     List<List<int>> input_ids,
     Map<String, dynamic> model_inputs,
     dynamic generation_config,
@@ -1580,7 +1581,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
       throw Exception('`_prepare_inputs_for_generation` is not initialized');
     }
 
-    return await _prepare_inputs_for_generation!(input_ids, model_inputs, generation_config);
+    return _prepare_inputs_for_generation!(input_ids, model_inputs, generation_config);
   }
 
   /// @param {Object} inputs
@@ -1589,17 +1590,17 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
   /// @param {Object} inputs.model_inputs
   /// @param {boolean} inputs.is_encoder_decoder
   /// @returns {Object} The updated model inputs for the next generation iteration.
-  Future<Map<String, dynamic>> _update_model_kwargs_for_generation({
+  Map<String, dynamic> _update_model_kwargs_for_generation({
     required List<List<int>> generated_input_ids,
     required Map<String, dynamic> outputs,
     required Map<String, dynamic> model_inputs,
     required bool is_encoder_decoder,
-  }) async {
+  }) {
     // update past_key_values
     model_inputs['past_key_values'] = getPastKeyValues(outputs, model_inputs['past_key_values']);
 
     // update inputs for next run
-    model_inputs['input_ids'] = await Tensor.create(
+    model_inputs['input_ids'] = Tensor.create(
       TensorDataType.int64,
       generated_input_ids.expand((e) => e).toList(),
       [generated_input_ids.length, 1],
@@ -1607,9 +1608,9 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
 
     if (!is_encoder_decoder) {
       // update attention mask
-      model_inputs['attention_mask'] = await cat([
+      model_inputs['attention_mask'] = cat([
         model_inputs['attention_mask'] as Tensor,
-        await ones([(model_inputs['attention_mask'] as Tensor).dims[0], 1]),
+        ones([(model_inputs['attention_mask'] as Tensor).dims[0], 1]),
       ], 1);
     } else if (model_inputs.containsKey('decoder_attention_mask')) {
       // TODO: update decoder attention mask if the model requires it
@@ -1693,28 +1694,28 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
 
     // for classifier free guidance we need to add a 'null' input to our encoder hidden states
     if (generation_config['guidance_scale'] != null && generation_config['guidance_scale'] > 1) {
-      last_hidden_state = await cat([
+      last_hidden_state = cat([
         last_hidden_state,
-        await full_like(last_hidden_state, 0.0),
+        full_like(last_hidden_state, 0.0),
       ], 0);
 
       if (model_inputs.containsKey('attention_mask')) {
-        model_inputs['attention_mask'] = await cat([
+        model_inputs['attention_mask'] = cat([
           model_inputs['attention_mask'] as Tensor,
-          await zeros_like(model_inputs['attention_mask']),
+          zeros_like(model_inputs['attention_mask']),
         ], 0);
       }
     } else if (model_inputs['decoder_input_ids'] != null) {
       // Ensure that the encoder outputs have the same batch size as the decoder inputs,
       // allowing for more efficient batched generation for single inputs
-      final decoder_input_ids_batch_size = (await toI64Tensor(model_inputs['decoder_input_ids'])).dims[0];
+      final decoder_input_ids_batch_size = toI64Tensor(model_inputs['decoder_input_ids']).dims[0];
       if (decoder_input_ids_batch_size != last_hidden_state.dims[0]) {
         if (last_hidden_state.dims[0] != 1) {
           throw Exception(
               'The encoder outputs have a different batch size (${last_hidden_state.dims[0]}) than the decoder inputs ($decoder_input_ids_batch_size).'
           );
         }
-        last_hidden_state = await cat(List<Tensor>.generate(decoder_input_ids_batch_size, (_) => last_hidden_state), 0);
+        last_hidden_state = cat(List<Tensor>.generate(decoder_input_ids_batch_size, (_) => last_hidden_state), 0);
       }
     }
     model_inputs['encoder_outputs'] = last_hidden_state;
@@ -1766,10 +1767,10 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
               (_) => decoder_input_ids,
         );
       }
-      decoder_input_ids = await toI64Tensor(decoder_input_ids);
+      decoder_input_ids = toI64Tensor(decoder_input_ids);
     }
 
-    model_kwargs['decoder_attention_mask'] = await ones_like(decoder_input_ids);
+    model_kwargs['decoder_attention_mask'] = ones_like(decoder_input_ids);
 
     return { 'input_ids': decoder_input_ids, 'model_inputs': model_inputs };
   }
@@ -1939,7 +1940,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
       // In most cases, this will be [batch_size, 1, vocab_size]
       // So, we select the last token's logits:
       // (equivalent to `logits = outputs.logits[:, -1, :]`)
-      final logits = await outputs['logits']!.slice([null, -1, null]);
+      final logits = outputs['logits']!.slice([null, -1, null]);
 
       final next_tokens_scores = await prepared_logits_processor(all_input_ids, logits);
 
@@ -1947,7 +1948,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
       // const new_kv_cache = [];// NOTE: Only used for beam search when concatenating new kv
       // Loop over each batch
       for (int batch_idx = 0; batch_idx < next_tokens_scores.dims.first; ++batch_idx) {
-        final logs = await next_tokens_scores[batch_idx];
+        final logs = next_tokens_scores[batch_idx];
 
         final sampledTokens = await sampler(logs);
         for (final (newTokenId, logProb) in sampledTokens) {
@@ -1970,7 +1971,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
         break;
       }
 
-      model_inputs = await _update_model_kwargs_for_generation(
+      model_inputs = _update_model_kwargs_for_generation(
         generated_input_ids: generated_input_ids,
         outputs: outputs,
         model_inputs: model_inputs,
@@ -1990,7 +1991,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
     );
 
     // TODO: ensure all_input_ids is padded correctly...
-    final sequences = await Tensor.create(
+    final sequences = Tensor.create(
       TensorDataType.int64,
       all_input_ids.flat(),
       [all_input_ids.length, all_input_ids[0].length],
@@ -2098,7 +2099,7 @@ class PreTrainedModel extends AbstractPreTrainedModel with PreTrainedModelMixin 
       final shapes = getCacheShapes(config!, { 'batch_size': batch_size });
       for (final name in shapes.keys) {
         final size = shapes[name]!.fold(1, (a, b) => a * b);
-        decoderFeeds[name] = await Tensor.create(
+        decoderFeeds[name] = Tensor.create(
           dtype,
           List.filled(size, 0),
           shapes[name],
@@ -2308,7 +2309,7 @@ class Idefics3ForConditionalGeneration extends Idefics3PreTrainedModel {
   Future<({Tensor inputs_embeds, dynamic attention_mask})> _merge_input_ids_with_image_features(Map<String, dynamic> kwargs) async {
     final image_features = kwargs['image_features'] as Tensor;
     final vision_hidden_size = image_features.dims.last;
-    final reshaped_image_hidden_states = await image_features.view([-1, vision_hidden_size]);
+    final reshaped_image_hidden_states = image_features.view([-1, vision_hidden_size]);
 
     return await default_merge_input_ids_with_image_features({
       'image_token_id': config?['image_token_id'],

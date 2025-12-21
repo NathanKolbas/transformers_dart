@@ -19,7 +19,7 @@ Future<void> main() async {
 
       final input_ids = [[1]];
 
-      final logits = await Tensor.create<double>(
+      final logits = Tensor.create<double>(
         TensorDataType.float32,
         [10, 20, 30, 40, 50],
         [1, vocabSize],

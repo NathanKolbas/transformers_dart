@@ -229,8 +229,8 @@ Future<void> main() async {
           normalize: true,
         ));
         final scores = await matmul(
-          await output.slice([[0, queries.length]]), // Query embeddings
-          await (await output.slice([[queries.length, null]])).transpose([1, 0]), // Document embeddings
+          output.slice([[0, queries.length]]), // Query embeddings
+          output.slice([[queries.length, null]]).transpose([1, 0]), // Document embeddings
         );
 
         expect(

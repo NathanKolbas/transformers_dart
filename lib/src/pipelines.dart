@@ -1,5 +1,3 @@
-import 'dart:developer';
-
 import 'package:transformers/src/base/processing_utils.dart';
 import 'package:transformers/src/generation/configuration_utils.dart';
 import 'package:transformers/src/models.dart';
@@ -130,9 +128,9 @@ class FillMaskPipeline extends Pipeline {
       if (mask_token_index == -1) {
         throw ArgumentError('Mask token (${tokenizer.mask_token}) not found in text.');
       }
-      final itemLogits = await (await logits[i])[mask_token_index];
+      final itemLogits = logits[i][mask_token_index];
 
-      final scores = await topk(await Tensor.create(
+      final scores = await topk(Tensor.create(
         TensorDataType.float32,
         softmax(itemLogits.data.cast<num>()),
         itemLogits.dims,
@@ -541,26 +539,26 @@ class FeatureExtractionPipeline extends Pipeline {
         // Skip pooling
         break;
       case 'mean':
-        result = await mean_pooling(result, model_inputs.attention_mask);
+        result = mean_pooling(result, model_inputs.attention_mask);
         break;
       case 'first_token':
       case 'cls':
-        result = await result.slice([null, 0]);
+        result = result.slice([null, 0]);
         break;
       case 'last_token':
       case 'eos':
-        result = await result.slice([null, -1]);
+        result = result.slice([null, -1]);
         break;
       default:
         throw ArgumentError("Pooling method '${options.pooling}' not supported.");
     }
 
     if (options.normalize) {
-      result = await result.normalize(2, -1);
+      result = result.normalize(2, -1);
     }
 
     if (options.quantize) {
-      result = await quantize_embeddings(result, options.precision);
+      result = quantize_embeddings(result, options.precision);
     }
 
     return result;

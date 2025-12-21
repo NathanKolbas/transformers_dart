@@ -1,7 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:transformers/src/models.dart';
 import 'package:transformers/src/models/auto/processing_auto.dart';
-import 'package:transformers/src/utils/hub.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:transformers/transformers.dart';
 
@@ -53,7 +52,7 @@ Future<void> main() async {
       }),
     });
     final generated_texts = processor.batch_decode(
-      await generated_ids.slice([null, [(inputs['input_ids'] as Tensor).dims.last, null]]),
+      generated_ids.slice([null, [(inputs['input_ids'] as Tensor).dims.last, null]]),
       skip_special_tokens: true,
     );
     print(generated_texts[0]);

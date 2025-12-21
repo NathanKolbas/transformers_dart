@@ -2,7 +2,6 @@ import 'package:transformers/src/base/image_processing_utils.dart';
 import 'package:transformers/src/base/processing_utils.dart';
 import 'package:transformers/src/models/auto/image_processing_auto.dart';
 import 'package:transformers/src/utils/core.dart';
-import 'package:transformers/src/utils/hub.dart';
 import 'package:transformers/transformers.dart';
 
 /// Prompt with expanded image tokens for when the image is split into patches.

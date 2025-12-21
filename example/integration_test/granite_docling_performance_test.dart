@@ -87,7 +87,7 @@ Future<void> main() async {
   stopwatch = Stopwatch()..start();
   Timeline.startSync('Decoding ids');
   final generated_texts = processor.batch_decode(
-    await generated_ids.slice([null, [(inputs['input_ids'] as Tensor).dims.last, null]]),
+    generated_ids.slice([null, [(inputs['input_ids'] as Tensor).dims.last, null]]),
     skip_special_tokens: true,
   );
   Timeline.finishSync();

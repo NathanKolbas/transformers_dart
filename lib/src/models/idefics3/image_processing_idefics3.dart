@@ -75,9 +75,9 @@ class Idefics3ImageProcessor extends ImageProcessor {
       reshaped_input_sizes.addAll(images_list.map((x) => x.reshaped_input_size));
 
       // Convert images to 4D tensors for easier processing
-      await Future.wait(images_list.map((x) async {
-        await x.pixel_values.unsqueeze_(0);
-      }));
+      for (final x in images_list) {
+        x.pixel_values.unsqueeze_(0);
+      }
 
       final int longest_edge = this.max_image_size['longest_edge'];
 
@@ -118,7 +118,7 @@ class Idefics3ImageProcessor extends ImageProcessor {
         images_list_cols.add(List.filled(images_list.length, 0));
       }
 
-      all_pixel_values.add(await cat(images_tensor, 0));
+      all_pixel_values.add(cat(images_tensor, 0));
     }
 
     final int batch_size = all_pixel_values.length;
@@ -128,21 +128,21 @@ class Idefics3ImageProcessor extends ImageProcessor {
     Tensor<double> pixel_values;
     Tensor<bool> pixel_attention_mask;
     if (batch_size == 1) {
-      pixel_values = await all_pixel_values[0].unsqueeze_(0);
-      pixel_attention_mask = await full([batch_size, n, h, w], true);
+      pixel_values = all_pixel_values[0].unsqueeze_(0);
+      pixel_attention_mask = full([batch_size, n, h, w], true);
     } else {
       // Add padding (if necessary) to images with less patches than the maximum number of patches
       final max_num_patches = all_pixel_values.map((x) => x.dims.first).reduce(math.max);
 
-      pixel_attention_mask = await full([batch_size, max_num_patches, h, w], true);
+      pixel_attention_mask = full([batch_size, max_num_patches, h, w], true);
       final pixel_attention_mask_data = pixel_attention_mask.data;
       final pixel_attention_mask_stride = max_num_patches * h * w;
       for (int i=0; i < batch_size; ++i) {
         final num_patches = all_pixel_values[i].dims[0];
         if (num_patches < max_num_patches) {
-          all_pixel_values[i] = await cat([
+          all_pixel_values[i] = cat([
             all_pixel_values[i],
-            await full([max_num_patches - num_patches, c, h, w], 0),
+            full([max_num_patches - num_patches, c, h, w], 0),
           ], 0);
 
           final start_offset = i * pixel_attention_mask_stride + num_patches * h * w;
@@ -153,7 +153,7 @@ class Idefics3ImageProcessor extends ImageProcessor {
           }
         }
       }
-      pixel_values = await stack(all_pixel_values, 0);
+      pixel_values = stack(all_pixel_values, 0);
     }
 
     return ImageProcessorResult(

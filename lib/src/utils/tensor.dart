@@ -91,7 +91,7 @@ class Tensor<T> {
   @override
   String toString() => 'Tensor { data: $data, type: $type, dims: $dims, size: $size }';
 
-  Future<Tensor<T>> operator [](int index) async => await _getitem(index);
+  Tensor<T> operator [](int index) => _getitem(index);
 
   /// Index into a Tensor object.
   /// @param {number} index The index to access.

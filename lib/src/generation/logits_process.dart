@@ -75,7 +75,7 @@ class ForcedBOSTokenLogitsProcessor extends LogitsProcessor {
   Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
       if (input_ids[i].length == 1) {
-        final batch_logits_data = (await logits[i]).data;
+        final batch_logits_data = logits[i].data;
         batch_logits_data.fillRange(0, batch_logits_data.length, -double.infinity);
         batch_logits_data[bos_token_id] = 0.0;
       }
@@ -105,7 +105,7 @@ class ForcedEOSTokenLogitsProcessor extends LogitsProcessor {
   Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
       if (input_ids[i].length == max_length - 1) {
-        final batch_logits_data = (await logits[i]).data;
+        final batch_logits_data = logits[i].data;
         batch_logits_data.fillRange(0, batch_logits_data.length, -double.infinity);
         for (final eos_token in eos_token_id) {
           batch_logits_data[eos_token] = 0.0;
@@ -136,7 +136,7 @@ class SuppressTokensAtBeginLogitsProcessor extends LogitsProcessor {
   Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
       if (input_ids[i].length == begin_index) {
-        final batch_logits_data = (await logits[i]).data;
+        final batch_logits_data = logits[i].data;
         for (final token_id in begin_suppress_tokens) {
           batch_logits_data[token_id] = -double.infinity;
         }
@@ -213,7 +213,7 @@ class NoRepeatNGramLogitsProcessor extends LogitsProcessor {
   @override
   Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
-      final batch_logits_data = (await logits[i]).data;
+      final batch_logits_data = logits[i].data;
       final bannedTokens = calcBannedNgramTokens(input_ids[i]);
       for (final token in bannedTokens) {
         batch_logits_data[token] = -double.infinity;
@@ -248,7 +248,7 @@ class RepetitionPenaltyLogitsProcessor extends LogitsProcessor {
   @override
   Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
-      final batch_logits_data = (await logits[i]).data;
+      final batch_logits_data = logits[i].data;
       for (final input_id in input_ids[i].toSet()) {
         final token = input_id;
         if (batch_logits_data[token] < 0) {
@@ -284,7 +284,7 @@ class MinLengthLogitsProcessor extends LogitsProcessor {
   Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
       if (input_ids[i].length < min_length) {
-        final batch_logits_data = (await logits[i]).data;
+        final batch_logits_data = logits[i].data;
 
         for (final eos_token in eos_token_id) {
           batch_logits_data[eos_token] = -double.infinity;
@@ -320,7 +320,7 @@ class MinNewTokensLengthLogitsProcessor extends LogitsProcessor {
     for (int i = 0; i < input_ids.length; ++i) {
       final new_tokens_length = input_ids[i].length - prompt_length_to_skip;
       if (new_tokens_length < min_new_tokens) {
-        final batch_logits_data = (await logits[i]).data;
+        final batch_logits_data = logits[i].data;
 
         for (final eos_token in eos_token_id) {
           batch_logits_data[eos_token] = -double.infinity;
@@ -350,7 +350,7 @@ class NoBadWordsLogitsProcessor extends LogitsProcessor {
   @override
   Future<Tensor> call(List<List<int>> input_ids, Tensor logits) async {
     for (int i = 0; i < input_ids.length; ++i) {
-      final batch_logits_data = (await logits[i]).data;
+      final batch_logits_data = logits[i].data;
       final ids = input_ids[i];
       for (final bad_word_ids in bad_words_ids) {
         // There aren't enough tokens to match the banned sequence
@@ -414,8 +414,8 @@ class ClassifierFreeGuidanceLogitsProcessor extends LogitsProcessor {
     }
 
     final unguided_bsz = input_ids.length;
-    final cond_logits = await logits.slice([[0, unguided_bsz], null]);
-    final uncond_logits = await logits.slice([[unguided_bsz, logits.dims[0]], null]);
+    final cond_logits = logits.slice([[0, unguided_bsz], null]);
+    final uncond_logits = logits.slice([[unguided_bsz, logits.dims[0]], null]);
 
     // Merge into uncond_logits (to save memory). This is equivalent to the following:
     // scores = uncond_logits + (cond_logits - uncond_logits) * guidance_scale

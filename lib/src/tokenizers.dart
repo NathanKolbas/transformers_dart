@@ -2715,21 +2715,21 @@ class PreTrainedTokenizer {
       final token_type_ids_tensor_data = encodedTokens.map((x) => x.token_type_ids).flat().toList();
 
       if (input_ids_tensor_data.length == required_length) {
-        result.input_ids = await Tensor.create(
+        result.input_ids = Tensor.create(
           TensorDataType.int64,
           input_ids_tensor_data,
           dims,
         );
       }
       if (attention_mask_tensor_data.length == required_length) {
-        result.attention_mask = await Tensor.create(
+        result.attention_mask = Tensor.create(
           TensorDataType.int64,
           attention_mask_tensor_data,
           dims,
         );
       }
       if (token_type_ids_tensor_data.length == required_length) {
-        result.token_type_ids = await Tensor.create(
+        result.token_type_ids = Tensor.create(
           TensorDataType.int64,
           token_type_ids_tensor_data,
           dims,
