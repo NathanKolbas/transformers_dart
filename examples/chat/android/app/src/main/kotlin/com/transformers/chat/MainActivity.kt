@@ -1,0 +1,5 @@
+package com.transformers.chat
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()
